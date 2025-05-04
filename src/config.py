@@ -1,20 +1,8 @@
 import os
-import json
 import psutil
-import requests
 import threading
-import webbrowser
-import tkinter as tk
-import tkinter.font as tkFont
-from tkinter import scrolledtext
-from tkinter import messagebox
 import sys
-from packaging import version
 import time
-import datetime
-from dotenv import load_dotenv
-from PIL import Image, ImageTk
-import global_variables
 
 def set_sc_log_location():
     """ Check for RSI Launcher and Star Citizen Launcher, and set SC_LOG_LOCATION accordingly. """

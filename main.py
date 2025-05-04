@@ -4,28 +4,17 @@ import sys
 # Add the 'src' directory to the Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-import json
-import psutil
-import requests
-import threading
-import webbrowser
 import tkinter as tk
-import tkinter.font as tkFont
-from tkinter import scrolledtext
-from tkinter import messagebox
-from packaging import version
-import time
-import datetime
 from dotenv import load_dotenv
-from PIL import Image, ImageTk
 from config import set_sc_log_location, auto_shutdown, find_rsi_handle, is_game_running
 from parser import start_tail_log_thread
 from setup_gui import setup_gui
 from crash_detection import game_heartbeat
 import global_variables
+from filelock import FileLock, Timeout
+import tempfile
 
 load_dotenv() # Load environment variables from .env file
-# API_KEY = os.getenv("API_KEY") # Example how to use the .env file
 
 local_version = "7.0"
 api_key = {"value": None}
@@ -41,6 +30,16 @@ class EventLogger:
         self.text_widget.see(tk.END)
 
 if __name__ == '__main__':
+    # Create a lock file in the system's temp directory
+    lock_path = os.path.join(tempfile.gettempdir(), "beowulfhunter.lock")
+    lock = FileLock(lock_path, timeout=1)
+
+    try:
+        lock.acquire()
+    except Timeout:
+        print("Another instance of BeowulfHunter is already running.")
+        sys.exit(1)
+
     game_running = is_game_running() # check processes to see if the game's running    
 
     app, logger = setup_gui(game_running) # setup the GUI or logger

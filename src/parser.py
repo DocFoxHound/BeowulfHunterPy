@@ -1,19 +1,8 @@
 import os
 import json
-import psutil
 import requests
 import threading
-import webbrowser
-import tkinter as tk
-import tkinter.font as tkFont
-from tkinter import scrolledtext
-from tkinter import messagebox
-import sys
-from packaging import version
 import time
-import datetime
-from dotenv import load_dotenv
-from PIL import Image, ImageTk
 import global_variables
 
 local_version = "7.0"
@@ -54,8 +43,8 @@ def tail_log(log_file_location, rsi_name):
         logger.log(f"No log file found at {log_file_location}.")
         return
 
-    logger.log("Kill Tracking Initiated...")
-    logger.log("Enter key to establish Servitor connection...")
+    logger.log("🗹 Log file found.")
+    # logger.log("Enter key to establish Servitor connection...")
 
     # Read all lines to find out what game mode player is currently, in case they booted up late.
     # Don't upload kills, we don't want repeating last sessions kills incase they are actually available.
@@ -139,7 +128,8 @@ def parse_kill_line(line, target_name):
 
     try:
         response = requests.post(
-            os.getenv("REPORT_KILL_URL"),
+            "https://beowulf.ironpoint.org/api/reportkill",
+            # os.getenv("REPORT_KILL_URL"),
             headers=headers,
             data=json.dumps(json_data)
         )

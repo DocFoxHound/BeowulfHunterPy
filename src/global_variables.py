@@ -1,7 +1,4 @@
 import tkinter as tk
-import tkinter.font as tkFont
-from tkinter import scrolledtext
-from tkinter import messagebox
 
 class EventLogger:
     def __init__(self, text_widget):

@@ -1,9 +1,0 @@
-API_KEY=super-secret-key
-LOCAL_VERSION=7.0
-DEBUG_MODE=true
-
-TEST_KEY_VALIDATE_URL="http://localhost:3000/api/keys/validatekey"
-KEY_VALIDATE_URL="https://beowulf.ironpoint.org/api/keys/validatekey"
-TEST_REPORT_KILL_URL="http://localhost:3000/api/reportkill"
-REPORT_KILL_URL="https://beowulf.ironpoint.org/api/reportkill"
-TEST_REPORT_KILL_URL="http://38.46.216.78:25966/reportKill"
