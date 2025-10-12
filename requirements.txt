@@ -9,3 +9,5 @@ packaging
 tk
 dotenv
 pillow
+plotly
+kaleido

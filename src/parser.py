@@ -325,7 +325,7 @@ def parse_backup_logs(backup_dir, rsi_name, user_id=None, progress_callback=None
     Optional progress_callback(index, total, filepath) will be called before
     parsing each file so callers (e.g. a GUI) can show concise progress.
 
-    Returns a tuple: (parsed_kills_count, duplicates_count)
+    Returns a tuple: (published_kills_count, duplicates_count)
     """
     try:
         if not backup_dir or not os.path.isdir(backup_dir):
@@ -403,6 +403,8 @@ def parse_backup_logs(backup_dir, rsi_name, user_id=None, progress_callback=None
         # aggregate parsed kills from all backup files
         aggregated_kills = []
         duplicates_count = 0
+        uploaded_count = 0
+        uploaded_kills = []
 
         for idx, fname in enumerate(files):
             fpath = os.path.join(backup_dir, fname)
@@ -489,9 +491,35 @@ def parse_backup_logs(backup_dir, rsi_name, user_id=None, progress_callback=None
                                         if is_dup:
                                             duplicates_count += 1
                                             if not suppress_file_logs:
-                                                global_variables.log(f"Skipping already-logged kill from backup (matched API within 30s): {parsed_victim} at {parsed_time_str}")
+                                                global_variables.log(f"Skipping already-logged kill from backup (matched API within 60s): {parsed_victim} at {parsed_time_str}")
                                         else:
-                                            aggregated_kills.append(parsed)
+                                            # non-duplicate: attempt to publish like parse_kill_line would
+                                            try:
+                                                # send_kill_to_api expects the JSON-shaped data similar to parse_kill_line
+                                                json_data = {
+                                                    'player': rsi_name,
+                                                    'victim': parsed.get('victim'),
+                                                    'time': parsed.get('time'),
+                                                    'zone': parsed.get('zone'),
+                                                    'weapon': parsed.get('weapon'),
+                                                    'rsi_profile': f"https://robertsspaceindustries.com/citizens/{parsed.get('victim')}",
+                                                    'game_mode': global_game_mode,
+                                                    'client_ver': local_version,
+                                                    'killers_ship': global_active_ship,
+                                                    'damage_type': parsed.get('damage_type')
+                                                }
+                                                sent = send_kill_to_api(json_data, suppress_logs=suppress_file_logs)
+                                                if sent:
+                                                    uploaded_count += 1
+                                                    try:
+                                                        uploaded_kills.append(parsed)
+                                                    except Exception:
+                                                        pass
+                                                else:
+                                                    # If sending failed, still keep local aggregated record for reporting
+                                                    aggregated_kills.append(parsed)
+                                            except Exception:
+                                                aggregated_kills.append(parsed)
                                 except Exception as e:
                                     if not suppress_file_logs:
                                         global_variables.log(f"Error parsing kill line in {fname}: {e}")
@@ -508,10 +536,21 @@ def parse_backup_logs(backup_dir, rsi_name, user_id=None, progress_callback=None
 
     # After successfully parsing all files, publish a summary of kills
     try:
-        if aggregated_kills:
+        # Combine uploaded_kills and aggregated_kills for a full summary
+        all_kills_for_summary = []
+        try:
+            all_kills_for_summary.extend(uploaded_kills)
+        except Exception:
+            pass
+        try:
+            all_kills_for_summary.extend(aggregated_kills)
+        except Exception:
+            pass
+
+        if all_kills_for_summary:
             # aggregate by victim
             summary = {}
-            for k in aggregated_kills:
+            for k in all_kills_for_summary:
                 victim = k.get('victim')
                 weapon = k.get('weapon')
                 damage = k.get('damage_type')
@@ -529,15 +568,15 @@ def parse_backup_logs(backup_dir, rsi_name, user_id=None, progress_callback=None
                 weapons_summary = ", ".join([f"{k}: {v}" for k, v in counts.items()])
                 global_variables.log(f"{victim}: {len(details)} kills — {weapons_summary}")
 
-            global_variables.log(f"Total kills parsed from backups: {total_kills}")
+            global_variables.log(f"Total kills parsed from backups: {total_kills} (uploaded: {uploaded_count}, failed uploads: {len(aggregated_kills)})")
         else:
             global_variables.log("No kills found in backup logs.")
     except Exception as e:
         global_variables.log(f"Error generating backup summary: {e}")
 
-    # Return summary counts: (parsed_count, duplicates_count)
+    # Return summary counts: (published_count, duplicates_count)
     try:
-        return (len(aggregated_kills), duplicates_count)
+        return (uploaded_count, duplicates_count)
     except Exception:
         return (0, duplicates_count)
 
@@ -585,30 +624,11 @@ def parse_kill_line(line, target_name):
         'damage_type': damage_type
     }
 
-    headers = {
-        'content-type': 'application/json',
-        'Authorization': api_key["value"] if api_key["value"] else ""
-    }
-
-    if not api_key["value"]:
-        global_variables.log("Kill event will not be sent. Enter valid key to establish connection with Servitor...")
-        return
-
+    # Delegate publishing to the centralized helper so there's a single upload path
     try:
-        response = requests.post(
-            "https://beowulf.ironpoint.org/api/reportkill",
-            # os.getenv("REPORT_KILL_URL"),
-            headers=headers,
-            data=json.dumps(json_data)
-        )
-        if response.status_code == 200 or response.status_code == 201:
-            global_variables.log("Kill logged.")
-        else:
-            # logger.log(f"Servitor connectivity error: {response.status_code}.")
-            global_variables.log("Relaunch BeowulfHunter and reconnect with a new Key.")
-    except requests.exceptions.RequestException as e:
+        publish_kill(json_data, suppress_logs=False)
+    except Exception as e:
         global_variables.log(f"Error sending kill event: {e}")
-        # logger.log("Kill event will not be sent. Please ensure a valid key and try again.")
 
 
 @global_variables.log_exceptions
@@ -656,6 +676,59 @@ def parse_kill_local(line, target_name, suppress_logs=False):
     except Exception as e:
         global_variables.log(f"parse_kill_local error: {e}")
         return None
+
+
+@global_variables.log_exceptions
+def send_kill_to_api(json_data, suppress_logs=False):
+    """Send a kill JSON payload to the API. Returns True on successful POST (200/201)."""
+    # Delegate to the central publishing helper
+    try:
+        return publish_kill(json_data, suppress_logs=suppress_logs)
+    except Exception:
+        return False
+
+
+@global_variables.log_exceptions
+def publish_kill(json_data, suppress_logs=False):
+    """Centralized publish function used by live and backup flows.
+
+    Returns True on success (HTTP 200/201) and False otherwise.
+    """
+    try:
+        key = global_variables.get_key()
+    except Exception:
+        key = None
+
+    api_key['value'] = key
+    if not api_key.get('value'):
+        if not suppress_logs:
+            global_variables.log("Kill event will not be sent. Enter valid key to establish connection with Servitor...")
+        return False
+
+    headers = {
+        'content-type': 'application/json',
+        'Authorization': api_key['value'] if api_key.get('value') else ""
+    }
+
+    try:
+        response = requests.post(
+            "https://beowulf.ironpoint.org/api/reportkill",
+            headers=headers,
+            data=json.dumps(json_data),
+            timeout=15
+        )
+        if response.status_code in (200, 201):
+            if not suppress_logs:
+                global_variables.log("Kill logged.")
+            return True
+        else:
+            if not suppress_logs:
+                global_variables.log("Relaunch BeowulfHunter and reconnect with a new Key.")
+            return False
+    except requests.exceptions.RequestException as e:
+        if not suppress_logs:
+            global_variables.log(f"Error sending kill event: {e}")
+        return False
 
 @global_variables.log_exceptions
 def check_substring_list(line, substring_list):

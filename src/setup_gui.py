@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import parser
+import graphs
 
 local_version = "7.0"  # You could pass this as a parameter if needed
 
@@ -34,7 +35,7 @@ BUTTON_STYLE = {
 def setup_gui(game_running):
     app = tk.Tk()
     app.title("BeowulfHunter")
-    app.geometry("650x450")
+    app.geometry("650x900")
     app.resizable(False, False)
     app.configure(bg="#1a1a1a")
 
@@ -112,24 +113,29 @@ def setup_gui(game_running):
 
     # Attach log_container to app so other initializers can reuse it
     setattr(app, 'log_container', log_container)
-    log_container.pack(padx=10, pady=10, fill=tk.BOTH, expand=False, side=tk.BOTTOM)
-    # Ensure the container does not resize based on its children; keep fixed
-    # pixel dimensions regardless of font changes in child widgets.
+    # Let the log container expand to fill available central space so the
+    # header is directly above it and the footer remains at the very bottom.
+    log_container.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+    # Allow children to request size changes so content sits naturally.
     try:
-        log_container.pack_propagate(False)
+        log_container.pack_propagate(True)
     except Exception:
         pass
 
-    # Create a left-side container for the text widget so we can give it an
-    # exact pixel area. Placing the ScrolledText inside this frame and using
-    # place(relwidth=1, relheight=1) ensures the text widget is forced to the
-    # container's pixel size and won't request geometry changes when the font
-    # size changes.
-    text_container = tk.Frame(log_container, bg="#1a1a1a")
-    text_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    # Top: make the text area span the full width so logs take the primary space.
+    top_text_container = tk.Frame(log_container, bg="#1a1a1a")
+    # Try to make the top text area a fixed height (px_height - bottom_h)
+    try:
+        bottom_h = int((px_height // 2) if 'px_height' in locals() else 320)
+        top_h = max(80, int(px_height - bottom_h))
+        top_text_container.config(height=top_h)
+        top_text_container.pack_propagate(False)
+        top_text_container.pack(side=tk.TOP, fill=tk.BOTH, expand=False)
+    except Exception:
+        top_text_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
     text_area = scrolledtext.ScrolledText(
-        text_container,
+        top_text_container,
         wrap=tk.WORD,
         width=80,
         height=20,
@@ -142,9 +148,10 @@ def setup_gui(game_running):
         highlightcolor="#ff0000",
         font=("Times New Roman", 12)
     )
-    # Force the text widget to exactly fill the pixel-sized left container so
-    # it will not resize the top-level window when its font changes.
+    # Fill the top area completely with the text widget
     text_area.place(x=0, y=0, relwidth=1, relheight=1)
+
+    
 
     # Persistent font controls — place these in the header placeholder so
     # they remain visible and do not consume space beside the text area.
@@ -192,6 +199,30 @@ def setup_gui(game_running):
         dec_btn.grid(row=0, column=1, padx=(2, 2), pady=4)
         setattr(app, 'inc_btn', inc_btn)
         setattr(app, 'dec_btn', dec_btn)
+
+        # Add a 'Show Kill Graph' button next to the font controls so it's
+        # always visible in the header area. Guard against missing
+        # matplotlib by letting graphs.show_kill_graph handle that.
+        try:
+            def _header_show_graph():
+                try:
+                    gw = getattr(app, 'graph_widget', None)
+                    if gw is not None:
+                        try:
+                            gw.refresh()
+                        except Exception:
+                            global_variables.log("Failed to refresh embedded graph.")
+                    else:
+                        global_variables.log("Graph not available in this layout.")
+                except Exception:
+                    global_variables.log("Error invoking graph refresh.")
+
+            graph_btn = tk.Button(font_control_frame, text="Graph", command=_header_show_graph, **BUTTON_STYLE)
+            graph_btn.grid(row=0, column=2, padx=(6, 2), pady=4)
+            setattr(app, 'graph_btn', graph_btn)
+        except Exception:
+            # Non-fatal: graph feature is optional.
+            pass
 
     # Font controls created above; no duplicate creation here.
 
@@ -285,7 +316,8 @@ def initialize_game_gui(app):
     # static size regardless of the amount of text it contains. If
     # `setup_gui` already created it, reuse that; otherwise create one here
     # using the same measurement logic so behavior is consistent.
-    if getattr(app, 'log_container', None) is None:
+    existing_log = getattr(app, 'log_container', None)
+    if existing_log is None:
         log_container = tk.Frame(app, bg="#1a1a1a")
         # Try to compute a pixel size from the baseline font metrics
         initial_font = ("Times New Roman", 12)
@@ -300,16 +332,68 @@ def initialize_game_gui(app):
         except Exception:
             # If measurement fails, fall back to a reasonable fixed size
             try:
-                log_container.config(width=650 - 40, height=300)
+                log_container.config(width=650 - 40, height=600)
                 log_container.pack_propagate(False)
             except Exception:
                 pass
         setattr(app, 'log_container', log_container)
-        log_container.pack(padx=10, pady=10, fill=tk.BOTH, expand=False, side=tk.BOTTOM)
-        # Ensure the container won't change size when children change their
-        # requested size (for example when font size changes).
+    else:
+        log_container = existing_log
+    # Pack the log_container to expand in the middle area between header
+    # and footer so layout is natural and no large gaps appear.
+    log_container.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+
+    # Create a top text area that spans full width, and a bottom row
+    # with a left graph (1/4 width) and a right placeholder for details.
+    try:
+        # Top text area container
+        top_text_container = tk.Frame(log_container, bg="#1a1a1a")
+        # If px_height was computed, size the top area to px_height - bottom_h
         try:
-            log_container.pack_propagate(False)
+            bottom_h = int((px_height // 2) if 'px_height' in locals() else 320)
+            top_h = max(80, int(px_height - bottom_h))
+            top_text_container.config(height=top_h)
+            top_text_container.pack_propagate(False)
+            top_text_container.pack(side=tk.TOP, fill=tk.BOTH, expand=False)
+        except Exception:
+            top_text_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        setattr(app, 'top_text_container', top_text_container)
+
+        # Bottom frame sized to a portion of the log_container
+        bottom_frame = tk.Frame(log_container, bg="#1a1a1a")
+        try:
+            bottom_h = int((px_height // 2) if 'px_height' in locals() else 320)
+            bottom_frame.config(height=bottom_h)
+            bottom_frame.pack_propagate(False)
+        except Exception:
+            pass
+        bottom_frame.pack(side=tk.BOTTOM, fill=tk.X)
+
+        graph_frame = tk.Frame(bottom_frame, bg="#1a1a1a")
+        try:
+            graph_w = int((px_width // 4) if 'px_width' in locals() else 360)
+            graph_frame.config(width=graph_w)
+            graph_frame.pack_propagate(False)
+        except Exception:
+            pass
+        graph_frame.pack(side=tk.LEFT, fill=tk.BOTH)
+
+        placeholder_frame = tk.Frame(bottom_frame, bg="#2a2a2a")
+        placeholder_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(6, 0))
+        placeholder_label = tk.Label(placeholder_frame, text="Details placeholder", fg="#bcbcd8", bg="#2a2a2a", font=("Times New Roman", 11))
+        placeholder_label.pack(padx=6, pady=6, anchor='nw')
+
+        # instantiate the graph widget in the bottom-left quarter
+        try:
+            setattr(app, 'graph_widget', graphs.GraphWidget(graph_frame, width=graph_w, height=bottom_h))
+        except Exception:
+            pass
+    except Exception:
+        pass
+        # Allow children to control sizing so the footer stays at the bottom
+        # and the top content sits directly under the header.
+        try:
+            log_container.pack_propagate(True)
         except Exception:
             pass
 

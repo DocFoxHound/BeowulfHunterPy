@@ -82,7 +82,7 @@ def create_load_prev_controls(app, text_area, button_style=None, controls_parent
                         bar_len = 24
                         filled = int((pct * bar_len) / 100)
                         bar = '[' + ('#' * filled) + ('-' * (bar_len - filled)) + ']'
-                        line = f"Loading backups {bar} {index}/{total} ({pct}%)"
+                        line = f"Loading logs {bar} {index}/{total} ({pct}%)"
 
                         ranges = text_area.tag_ranges('loading')
                         prev_state = None
