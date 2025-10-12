@@ -4,9 +4,191 @@ import requests
 import threading
 import time
 import global_variables
+from datetime import datetime, timezone, timedelta
 
 local_version = "7.0"
 api_key = {"value": None}
+# Cache of kills fetched from the API for the current run. Stored as set of
+# (victim, timestamp) tuples for fast duplicate checks by other functions.
+api_kills_cache = set()
+
+
+@global_variables.log_exceptions
+def get_user_kills_from_api(user_id):
+    """Fetch existing kills for a user from the Beowulf blackbox API.
+
+    Returns a set of (victim, time) tuples for quick duplicate checking. If
+    anything goes wrong or the response format is unexpected, an empty set
+    is returned and parsing proceeds normally.
+    """
+    # If caller didn't provide a user_id, try to read it from global variables
+    if not user_id:
+        try:
+            user_id = global_variables.get_user_id()
+        except Exception:
+            user_id = None
+
+    if not user_id:
+        return set()
+
+    url = f"https://beowulf.ironpoint.org/api/blackbox/user?user_id={user_id}"
+    headers = {}
+    if api_key.get('value'):
+        headers['Authorization'] = api_key['value']
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            global_variables.log(f"Failed to fetch user kills: {resp.status_code}")
+            return set()
+        data = resp.json()
+        # Diagnostic: log top-level response shape so we can adapt to API formats
+        try:
+            if isinstance(data, dict):
+                keys = list(data.keys())
+            else:
+                keys = None
+            # global_variables.log(f"API response type: {type(data).__name__}, top-level keys: {keys}")
+        except Exception:
+            pass
+    except Exception as e:
+        global_variables.log(f"Error fetching user kills from API: {e}")
+        return set()
+
+    kills = set()
+    try:
+        # support a few common response shapes
+        if isinstance(data, dict):
+            candidates = data.get('kills') or data.get('data') or data.get('results') or data.get('items') or []
+        elif isinstance(data, list):
+            candidates = data
+        else:
+            candidates = []
+
+        # clear existing cache for fresh fetch
+        try:
+            api_kills_cache.clear()
+        except Exception:
+            pass
+
+        # Diagnostics counters for debugging why items may be dropped
+        non_dict_items = 0
+        missing_time = 0
+        missing_victim = 0
+        added = 0
+
+        for item in candidates:
+            if not isinstance(item, dict):
+                non_dict_items += 1
+                continue
+
+            # Victim(s) may be provided as a single field or as a list under 'victims'
+            victims = []
+            if 'victims' in item and isinstance(item.get('victims'), (list, tuple)):
+                victims = item.get('victims')
+            else:
+                v = item.get('victim') or item.get('victim_name') or item.get('victimName')
+                if v:
+                    victims = [v]
+
+            # Timestamp can appear under several keys; prefer 'timestamp'
+            time_val = item.get('timestamp') or item.get('time') or item.get('kill_time') or item.get('timestamp')
+            if not time_val:
+                missing_time += 1
+                # if no time value, skip adding for duplicate detection
+                continue
+
+            time_str = str(time_val).strip()
+            if not victims:
+                missing_victim += 1
+            for victim in victims:
+                if not victim:
+                    missing_victim += 1
+                    continue
+                victim_str = str(victim).strip()
+                key = (victim_str, time_str)
+                kills.add(key)
+                try:
+                    api_kills_cache.add(key)
+                except Exception:
+                    # best-effort caching; don't break parsing for cache failures
+                    pass
+                added += 1
+    except Exception as e:
+        global_variables.log(f"Unexpected API response format when parsing kills: {e}")
+
+    # Diagnostic summary about items processed / skipped
+    try:
+        try:
+            candidates_len = len(candidates) if 'candidates' in locals() and candidates is not None else 'N/A'
+        except Exception:
+            candidates_len = 'N/A'
+        # global_variables.log(f"API candidates: {candidates_len}, added: {added}, non-dict: {non_dict_items}, missing_time: {missing_time}, missing_victim: {missing_victim}")
+        # Show a small sample of candidate items for inspection
+        try:
+            sample = candidates[:5] if isinstance(candidates, (list, tuple)) else None
+            # if sample:
+            #     global_variables.log(f"API candidates sample (first up to 5): {sample}")
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # global_variables.log(f"Fetched {len(kills)} existing kills for user_id {user_id}")
+    # Debug: log the actual kills retrieved for easier troubleshooting.
+    # try:
+    #     if kills:
+    #         # Convert to a stable list and limit the output length to avoid
+    #         # spamming the UI if the set is large.
+    #         kills_list = list(kills)
+    #         display_count = 100
+    #         if len(kills_list) > display_count:
+    #             try:
+    #                 global_variables.log(f"API kills (first {display_count} of {len(kills_list)}): {kills_list[:display_count]}")
+    #             except Exception:
+    #                 print(f"API kills (first {display_count} of {len(kills_list)}): {kills_list[:display_count]}")
+    #         else:
+    #             try:
+    #                 global_variables.log(f"API kills: {kills_list}")
+    #             except Exception:
+    #                 print(f"API kills: {kills_list}")
+    # except Exception:
+    #     pass
+    return kills
+
+
+@global_variables.log_exceptions
+def refresh_api_kills_cache(user_id=None):
+    """Refresh the in-memory API kills cache.
+
+    This should be called at startup and whenever the application needs an
+    up-to-date list of kills from the remote API (for duplicate detection).
+    The function returns the cached set of (victim, timestamp) tuples.
+    """
+    try:
+        kills = get_user_kills_from_api(user_id)
+        try:
+            api_kills_cache.clear()
+        except Exception:
+            pass
+        try:
+            for k in kills:
+                api_kills_cache.add(k)
+        except Exception:
+            pass
+
+        # try:
+        #     global_variables.log(f"API kills cache refreshed: {len(api_kills_cache)} entries")
+        # except Exception:
+        #     pass
+
+        return api_kills_cache
+    except Exception as e:
+        try:
+            global_variables.log(f"Failed to refresh API kills cache: {e}")
+        except Exception:
+            pass
+        return set()
 
 # Substrings to ignore
 ignore_kill_substrings = [
@@ -28,60 +210,346 @@ global_active_ship = "N/A"
 global_active_ship_id = "N/A"
 global_player_geid = "N/A"
 
+@global_variables.log_exceptions
 def start_tail_log_thread(log_file_location, rsi_name):
     """Start the log tailing in a separate thread."""
     thread = threading.Thread(target=tail_log, args=(log_file_location, rsi_name))
     thread.daemon = True
     thread.start()
 
+@global_variables.log_exceptions
 def tail_log(log_file_location, rsi_name):
-    logger = global_variables.get_logger()
-    """Read the log file and display events in the GUI."""
+    """Read the log file and display events in the GUI.
+
+    Uses `global_variables.log()` for thread-safe logging.
+    """
     global global_game_mode, global_player_geid
-    sc_log = open(log_file_location, "r")
-    if sc_log is None:
-        logger.log(f"No log file found at {log_file_location}.")
+    try:
+        sc_log = open(log_file_location, "rb")
+    except Exception as e:
+        global_variables.log(f"Failed to open log file {log_file_location}: {e}")
         return
 
-    logger.log("🗹 Log file found.")
+    global_variables.log("🗹 Log file found.")
     # logger.log("Enter key to establish Servitor connection...")
 
     # Read all lines to find out what game mode player is currently, in case they booted up late.
     # Don't upload kills, we don't want repeating last sessions kills incase they are actually available.
+    # Read old lines as bytes and decode safely, logging any offending byte sequences
+    def _decode_line_bytes(line_bytes, base_offset):
+        try:
+            return line_bytes.decode("utf-8")
+        except UnicodeDecodeError as e:
+            # e.start is the index within this line_bytes where decoding failed
+            start = e.start
+            end = e.end
+            offending = line_bytes[start:end]
+            file_pos = base_offset + start
+            try:
+                global_variables.log(
+                    f"UnicodeDecodeError at byte pos {file_pos} (line offset {start}-{end}): {offending.hex()}"
+                )
+            except Exception:
+                print(f"UnicodeDecodeError at byte pos {file_pos}: {offending.hex()}")
+            # Return a replacement-decoded string so parsing can continue
+            return line_bytes.decode("utf-8", errors="replace")
+
     lines = sc_log.readlines()
-    print("Loading old log (if available)! Kills shown will not be uploaded as they are stale.")
-    for line in lines:
+    base_offset = 0
+    for bline in lines:
+        line = _decode_line_bytes(bline, base_offset)
+        base_offset += len(bline)
         read_log_line(line, rsi_name, False)
 
     # Main loop to monitor the log
     last_log_file_size = os.stat(log_file_location).st_size
     while True:
         where = sc_log.tell()
-        line = sc_log.readline()
-        if not line:
+        bline = sc_log.readline()
+        if not bline:
             time.sleep(1)
             sc_log.seek(where)
             if last_log_file_size > os.stat(log_file_location).st_size:
                 sc_log.close()
-                sc_log = open(log_file_location, "r")
+                try:
+                    sc_log = open(log_file_location, "rb")
+                except Exception as e:
+                    global_variables.log(f"Failed to reopen log file {log_file_location}: {e}")
+                    time.sleep(1)
+                    continue
                 last_log_file_size = os.stat(log_file_location).st_size
         else:
+            # decode the bytes and pass the resulting string to the parser
+            line = _decode_line_bytes(bline, where)
             read_log_line(line, rsi_name, True)
 
+@global_variables.log_exceptions
 def read_existing_log(log_file_location, rsi_name):
-    sc_log = open(log_file_location, "r")
+    try:
+        sc_log = open(log_file_location, "rb")
+    except Exception as e:
+        global_variables.log(f"Failed to open log file {log_file_location}: {e}")
+        return
+
+    def _decode_line_bytes(line_bytes, base_offset):
+        try:
+            return line_bytes.decode("utf-8")
+        except UnicodeDecodeError as e:
+            start = e.start
+            end = e.end
+            offending = line_bytes[start:end]
+            file_pos = base_offset + start
+            try:
+                global_variables.log(
+                    f"UnicodeDecodeError at byte pos {file_pos} (line offset {start}-{end}): {offending.hex()}"
+                )
+            except Exception:
+                print(f"UnicodeDecodeError at byte pos {file_pos}: {offending.hex()}")
+            return line_bytes.decode("utf-8", errors="replace")
+
     lines = sc_log.readlines()
-    for line in lines:
+    base_offset = 0
+    for bline in lines:
+        line = _decode_line_bytes(bline, base_offset)
+        base_offset += len(bline)
         read_log_line(line, rsi_name, True)
 
+
+@global_variables.log_exceptions
+def parse_backup_logs(backup_dir, rsi_name, user_id=None, progress_callback=None, suppress_file_logs=False):
+    """Parse all log files in the backup_dir without uploading kills.
+
+    This will iterate all files in the directory and parse each as a log file.
+    Kills are parsed but not sent to the server (upload_kills=False).
+
+    Optional progress_callback(index, total, filepath) will be called before
+    parsing each file so callers (e.g. a GUI) can show concise progress.
+
+    Returns a tuple: (parsed_kills_count, duplicates_count)
+    """
+    try:
+        if not backup_dir or not os.path.isdir(backup_dir):
+            if not suppress_file_logs:
+                global_variables.log(f"No backup directory found at: {backup_dir}")
+            return (0, 0)
+
+        files = [f for f in os.listdir(backup_dir) if os.path.isfile(os.path.join(backup_dir, f))]
+        files.sort()
+        total_files = len(files)
+        if not suppress_file_logs:
+            global_variables.log(f"Found {total_files} backup files in {backup_dir}")
+
+        # Optionally fetch existing kills from the server to avoid duplicates
+        existing_kills = set()
+        # We'll also build a parsed-version of the API kills with datetimes
+        existing_kills_parsed = []  # list of tuples (victim_lower, datetime or None, raw_time_str)
+        # helper to parse ISO-like timestamps robustly (reusable for API and log timestamps)
+        def _parse_ts(ts):
+            if ts is None:
+                return None
+            try:
+                s = str(ts).strip()
+                # remove surrounding angle brackets or quotes
+                if s.startswith('<') and s.endswith('>'):
+                    s = s[1:-1].strip()
+                # robustly strip any surrounding quotes
+                s = s.strip().strip('"').strip("'")
+
+                # Try common ISO formats; handle trailing Z (UTC)
+                if s.endswith('Z'):
+                    # Try with fractional seconds
+                    try:
+                        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+                    except Exception:
+                        try:
+                            return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                        except Exception:
+                            return None
+
+                # Try fromisoformat which handles offsets like +00:00
+                try:
+                    dt = datetime.fromisoformat(s)
+                    if dt.tzinfo is None:
+                        # assume UTC when unspecified
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    return dt
+                except Exception:
+                    # Try without fractional seconds
+                    try:
+                        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+                    except Exception:
+                        return None
+            except Exception:
+                return None
+        if user_id:
+            try:
+                existing_kills = get_user_kills_from_api(user_id)
+                for ak in existing_kills:
+                    try:
+                        victim = str(ak[0]).strip()
+                        raw_time = str(ak[1]).strip() if len(ak) > 1 else None
+                        dt = _parse_ts(raw_time)
+                        existing_kills_parsed.append((victim.lower(), dt, raw_time))
+                    except Exception:
+                        # best-effort: still keep the raw tuple if parsing failed
+                        try:
+                            existing_kills_parsed.append((str(ak[0]).strip().lower(), None, str(ak[1]) if len(ak) > 1 else None))
+                        except Exception:
+                            pass
+            except Exception as e:
+                if not suppress_file_logs:
+                    global_variables.log(f"Error obtaining existing kills for duplicate check: {e}")
+
+        # aggregate parsed kills from all backup files
+        aggregated_kills = []
+        duplicates_count = 0
+
+        for idx, fname in enumerate(files):
+            fpath = os.path.join(backup_dir, fname)
+            # report concise progress to caller if provided
+            if progress_callback:
+                try:
+                    progress_callback(idx + 1, total_files, fpath)
+                except Exception:
+                    # don't let progress callback failures stop parsing
+                    pass
+
+            if not suppress_file_logs:
+                global_variables.log(f"Parsing backup file: {fpath}")
+
+            try:
+                with open(fpath, "rb") as fh:
+                    base_offset = 0
+                    for bline in fh:
+                        # decode line bytes safely
+                        try:
+                            line = bline.decode("utf-8")
+                        except UnicodeDecodeError as e:
+                            start = e.start
+                            end = e.end
+                            offending = bline[start:end]
+                            file_pos = base_offset + start
+                            if not suppress_file_logs:
+                                global_variables.log(
+                                    f"UnicodeDecodeError in backup {fname} at byte pos {file_pos} (offset {start}-{end}): {offending.hex()}"
+                                )
+                            line = bline.decode("utf-8", errors="replace")
+
+                        base_offset += len(bline)
+                        # parse but do not upload kills
+                        try:
+                            # allow read_log_line to update game/session state
+                            read_log_line(line, rsi_name, False)
+                            # Additionally, if this line is a kill line, parse it locally and collect result
+                            if ("CActor::Kill" in line) and (not check_substring_list(line, ignore_kill_substrings)):
+                                try:
+                                    parsed = parse_kill_local(line, rsi_name, suppress_logs=suppress_file_logs)
+                                    if parsed:
+                                        # Duplicate check: look for API kills within 60 seconds of the backup kill
+                                        try:
+                                            parsed_victim = str(parsed.get('victim')).strip()
+                                            parsed_time_str = str(parsed.get('time')).strip()
+                                        except Exception:
+                                            parsed_victim = None
+                                            parsed_time_str = None
+
+                                        is_dup = False
+                                        # parse backup kill time into datetime (assume ISO or similar)
+                                        parsed_dt = None
+                                        try:
+                                            parsed_dt = _parse_ts(parsed_time_str)
+                                        except Exception:
+                                            parsed_dt = None
+
+                                        if parsed_victim:
+                                            pv_lower = parsed_victim.lower()
+                                            # check each existing API kill for victim match and timestamp window
+                                            for (ak_victim_lower, ak_dt, ak_raw) in existing_kills_parsed:
+                                                try:
+                                                    if ak_victim_lower != pv_lower:
+                                                        continue
+                                                    # if API kill has no parsed dt, fall back to raw string equality of time
+                                                    if ak_dt is None or parsed_dt is None:
+                                                        # fall back to exact raw time string compare
+                                                        if ak_raw and parsed_time_str and ak_raw == parsed_time_str:
+                                                            is_dup = True
+                                                            break
+                                                        else:
+                                                            continue
+
+                                                    # compute delta = api_time - backup_time (seconds)
+                                                    delta = (ak_dt - parsed_dt).total_seconds()
+                                                    # consider duplicates where API kill is within +/-60 seconds of backup kill
+                                                    if abs(delta) <= 60:
+                                                        is_dup = True
+                                                        break
+                                                except Exception:
+                                                    continue
+
+                                        if is_dup:
+                                            duplicates_count += 1
+                                            if not suppress_file_logs:
+                                                global_variables.log(f"Skipping already-logged kill from backup (matched API within 30s): {parsed_victim} at {parsed_time_str}")
+                                        else:
+                                            aggregated_kills.append(parsed)
+                                except Exception as e:
+                                    if not suppress_file_logs:
+                                        global_variables.log(f"Error parsing kill line in {fname}: {e}")
+                        except Exception as e:
+                            if not suppress_file_logs:
+                                global_variables.log(f"Error parsing line in {fname}: {e}")
+            except Exception as e:
+                if not suppress_file_logs:
+                    global_variables.log(f"Failed to parse backup file {fpath}: {e}")
+
+    except Exception as e:
+        global_variables.log(f"Error in parse_backup_logs: {e}")
+        return (0, 0)
+
+    # After successfully parsing all files, publish a summary of kills
+    try:
+        if aggregated_kills:
+            # aggregate by victim
+            summary = {}
+            for k in aggregated_kills:
+                victim = k.get('victim')
+                weapon = k.get('weapon')
+                damage = k.get('damage_type')
+                summary.setdefault(victim, []).append((weapon, damage))
+
+            global_variables.log("\nBackup parse summary:")
+            total_kills = 0
+            for victim, details in summary.items():
+                total_kills += len(details)
+                # count weapons/damage occurrences
+                counts = {}
+                for w, d in details:
+                    key = f"{w} ({d})"
+                    counts[key] = counts.get(key, 0) + 1
+                weapons_summary = ", ".join([f"{k}: {v}" for k, v in counts.items()])
+                global_variables.log(f"{victim}: {len(details)} kills — {weapons_summary}")
+
+            global_variables.log(f"Total kills parsed from backups: {total_kills}")
+        else:
+            global_variables.log("No kills found in backup logs.")
+    except Exception as e:
+        global_variables.log(f"Error generating backup summary: {e}")
+
+    # Return summary counts: (parsed_count, duplicates_count)
+    try:
+        return (len(aggregated_kills), duplicates_count)
+    except Exception:
+        return (0, duplicates_count)
+
 # Trigger kill event
+@global_variables.log_exceptions
 def parse_kill_line(line, target_name):
     key = global_variables.get_key()
-    logger = global_variables.get_logger()
+    # use global_variables.log for logging
     api_key['value'] = key
-    print(f"Current API Key: {api_key['value']}")
+    global_variables.log(f"Current API Key: {api_key['value']}")
 
-    if not check_exclusion_scenarios(line, logger):
+    if not check_exclusion_scenarios(line):
         return
 
     split_line = line.split(' ')
@@ -99,11 +567,11 @@ def parse_kill_line(line, target_name):
     damage_type = split_line[21].strip('\'')
 
     if killed == killer or killer.lower() == "unknown" or killed == target_name:
-        logger.log("You DIED.")
+        global_variables.log("You DIED.")
         return
 
     event_message = f"You have killed {killed},"
-    logger.log(event_message)
+    global_variables.log(event_message)
     json_data = {
         'player': target_name,
         'victim': killed,
@@ -123,7 +591,7 @@ def parse_kill_line(line, target_name):
     }
 
     if not api_key["value"]:
-        logger.log("Kill event will not be sent. Enter valid key to establish connection with Servitor...")
+        global_variables.log("Kill event will not be sent. Enter valid key to establish connection with Servitor...")
         return
 
     try:
@@ -134,14 +602,62 @@ def parse_kill_line(line, target_name):
             data=json.dumps(json_data)
         )
         if response.status_code == 200 or response.status_code == 201:
-            logger.log("Kill logged.")
+            global_variables.log("Kill logged.")
         else:
             # logger.log(f"Servitor connectivity error: {response.status_code}.")
-            logger.log("Relaunch BeowulfHunter and reconnect with a new Key.")
+            global_variables.log("Relaunch BeowulfHunter and reconnect with a new Key.")
     except requests.exceptions.RequestException as e:
-        logger.log(f"Error sending kill event: {e}")
+        global_variables.log(f"Error sending kill event: {e}")
         # logger.log("Kill event will not be sent. Please ensure a valid key and try again.")
 
+
+@global_variables.log_exceptions
+def parse_kill_local(line, target_name, suppress_logs=False):
+    """Parse a kill line and log the parsed kill locally without attempting to upload."""
+    try:
+        split_line = line.split(' ')
+        kill_time = split_line[0].strip("'")
+        killed = split_line[5].strip("'")
+        killed_zone = split_line[9].strip("'")
+        killer = split_line[12].strip("'")
+        weapon = split_line[15].strip("'")
+        damage_type = split_line[21].strip("'")
+
+        if killed == killer or killer.lower() == "unknown" or killed == target_name:
+            if not suppress_logs:
+                global_variables.log("You DIED.")
+            return
+
+        event_message = f"[BACKUP] You have killed {killed} at {kill_time} in {killed_zone} using {weapon} (damage: {damage_type})"
+        if not suppress_logs:
+            global_variables.log(event_message)
+
+        # Also present a compact JSON-like summary for debugging/inspection
+        json_data = {
+            'player': target_name,
+            'victim': killed,
+            'time': kill_time,
+            'zone': killed_zone,
+            'weapon': weapon,
+            'rsi_profile': f"https://robertsspaceindustries.com/citizens/{killed}",
+            'game_mode': global_game_mode,
+            'client_ver': "7.0",
+            'killers_ship': global_active_ship,
+            'damage_type': damage_type,
+            'source': 'backup'
+        }
+        try:
+            if not suppress_logs:
+                global_variables.log(f"Parsed kill (backup): {json.dumps(json_data)}")
+        except Exception:
+            if not suppress_logs:
+                global_variables.log(str(json_data))
+        return json_data
+    except Exception as e:
+        global_variables.log(f"parse_kill_local error: {e}")
+        return None
+
+@global_variables.log_exceptions
 def check_substring_list(line, substring_list):
     """
     Check if any substring from the list is present in the given line.
@@ -151,24 +667,51 @@ def check_substring_list(line, substring_list):
             return True
     return False
 
-def check_exclusion_scenarios(line, logger):
+@global_variables.log_exceptions
+def check_exclusion_scenarios(line):
     global global_game_mode
     if global_game_mode == "EA_FreeFlight" and -1 != line.find("Crash"):
-        print("Probably a ship reset, ignoring kill!")
+        global_variables.log("Probably a ship reset, ignoring kill!")
         return False
     return True
 
+@global_variables.log_exceptions
 def find_rsi_geid(log_file_location):
     global global_player_geid
     acct_kw = "AccountLoginCharacterStatus_Character"
-    sc_log = open(log_file_location, "r")
+    try:
+        sc_log = open(log_file_location, "rb")
+    except Exception as e:
+        global_variables.log(f"Failed to open log file {log_file_location}: {e}")
+        return
+
+    def _decode_line_bytes(line_bytes, base_offset):
+        try:
+            return line_bytes.decode("utf-8")
+        except UnicodeDecodeError as e:
+            start = e.start
+            end = e.end
+            offending = line_bytes[start:end]
+            file_pos = base_offset + start
+            try:
+                global_variables.log(
+                    f"UnicodeDecodeError at byte pos {file_pos} (line offset {start}-{end}): {offending.hex()}"
+                )
+            except Exception:
+                print(f"UnicodeDecodeError at byte pos {file_pos}: {offending.hex()}")
+            return line_bytes.decode("utf-8", errors="replace")
+
     lines = sc_log.readlines()
     for line in lines:
-        if -1 != line.find(acct_kw):
-            global_player_geid = line.split(' ')[11]
-            print("Player geid: " + global_player_geid)
+        # line is bytes; decode safely preserving offsets
+        # we cannot easily track exact file offsets here, so pass base_offset=0
+        text_line = _decode_line_bytes(line, 0)
+        if -1 != text_line.find(acct_kw):
+            global_player_geid = text_line.split(' ')[11]
+            global_variables.log("Player geid: " + global_player_geid)
             return
 
+@global_variables.log_exceptions
 def set_game_mode(line):
     global global_game_mode
     global global_active_ship
@@ -182,6 +725,7 @@ def set_game_mode(line):
         global_active_ship = "N/A"
         global_active_ship_id = "N/A"
 
+@global_variables.log_exceptions
 def read_log_line(line, rsi_name, upload_kills):
     if -1 != line.find("<Context Establisher Done>"):
         set_game_mode(line)
@@ -199,25 +743,28 @@ def read_log_line(line, rsi_name, upload_kills):
         destroy_player_zone(line)
 
 
+@global_variables.log_exceptions
 def destroy_player_zone(line):
     global global_active_ship
     global global_active_ship_id
     if ("N/A" != global_active_ship) or ("N/A" != global_active_ship_id):
-        print(f"Ship Destroyed: {global_active_ship} with ID: {global_active_ship_id}")
+        global_variables.log(f"Ship Destroyed: {global_active_ship} with ID: {global_active_ship_id}")
         global_active_ship = "N/A"
         global_active_ship_id = "N/A"
 
+@global_variables.log_exceptions
 def set_ac_ship(line):
     global global_active_ship
     global_active_ship = line.split(' ')[5][1:-1]
-    print("Player has entered ship: ", global_active_ship)
+    global_variables.log(f"Player has entered ship: {global_active_ship}")
 
+@global_variables.log_exceptions
 def set_player_zone(line):
     global global_active_ship
     global global_active_ship_id
     line_index = line.index("-> Entity ") + len("-> Entity ")
     if 0 == line_index:
-        print("Active Zone Change: ", global_active_ship)
+        global_variables.log(f"Active Zone Change: {global_active_ship}")
         global_active_ship = "N/A"
         return
     potential_zone = line[line_index:].split(' ')[0]
@@ -226,6 +773,6 @@ def set_player_zone(line):
         if potential_zone.startswith(x):
             global_active_ship = potential_zone[:potential_zone.rindex('_')]
             global_active_ship_id = potential_zone[potential_zone.rindex('_') + 1:]
-            print(f"Active Zone Change: {global_active_ship} with ID: {global_active_ship_id}")
+            global_variables.log(f"Active Zone Change: {global_active_ship} with ID: {global_active_ship_id}")
             return
         

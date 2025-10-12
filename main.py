@@ -8,6 +8,8 @@ import tkinter as tk
 from dotenv import load_dotenv
 from config import set_sc_log_location, auto_shutdown, find_rsi_handle, is_game_running
 from parser import start_tail_log_thread
+from parser import refresh_api_kills_cache
+import threading
 from setup_gui import setup_gui
 from crash_detection import game_heartbeat
 import global_variables
@@ -37,7 +39,7 @@ if __name__ == '__main__':
     try:
         lock.acquire()
     except Timeout:
-        print("Another instance of BeowulfHunter is already running.")
+        global_variables.log("Another instance of BeowulfHunter is already running.")
         sys.exit(1)
 
     game_running = is_game_running() # check processes to see if the game's running    
@@ -54,6 +56,15 @@ if __name__ == '__main__':
             if rsi_handle:
                 start_tail_log_thread(log_file_location, rsi_handle)
                 game_heartbeat(1, True)
+
+    # Refresh API kills cache in background so duplicate detection is ready
+    try:
+        threading.Thread(target=refresh_api_kills_cache, args=(global_variables.get_user_id(),), daemon=True).start()
+    except Exception:
+        try:
+            global_variables.log("Failed to start API kills cache refresh thread")
+        except Exception:
+            pass
 
     
     # Initiate auto-shutdown after 72 hours (72 * 60 * 60 seconds)

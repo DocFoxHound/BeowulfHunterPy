@@ -10,8 +10,8 @@ from config import set_sc_log_location, auto_shutdown, find_rsi_handle, is_game_
 import global_variables
 
 
+@global_variables.log_exceptions
 def game_heartbeat(check_interval, game_running):
-    logger = global_variables.get_logger()
     """Check every X seconds if the game is running. When detected, trigger callback."""
     def heartbeat_loop():
         while game_running:
@@ -19,20 +19,20 @@ def game_heartbeat(check_interval, game_running):
                 time.sleep(check_interval)
                 continue
             if is_game_running() is None:
-                logger.log("Game Crashed")
+                global_variables.log("Game Crashed")
+                global_variables.log("Will resume monitoring game.log once game is re-launched.")
                 while is_game_running() is None:
-                    logger.log("Waiting for StarCitizen...")
                     game_running_check = is_game_running()
                     time.sleep(check_interval)
-                logger.log("Game is running again.")
+                global_variables.log("Game is running again.")
                 on_game_relaunch()
                 continue
 
 
     threading.Thread(target=heartbeat_loop, daemon=True).start()
 
+@global_variables.log_exceptions
 def on_game_relaunch():
-    logger = global_variables.get_logger()
     # Reset necessary state, you can expand this
     global_variables.set_log_file_location(set_sc_log_location())
-    logger.log("🗹 Game relaunched")
+    global_variables.log("🗹 Game relaunched")
