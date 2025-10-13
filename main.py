@@ -6,8 +6,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
 import tkinter as tk
 from dotenv import load_dotenv
-from config import set_sc_log_location, auto_shutdown, find_rsi_handle, is_game_running
-from parser import start_tail_log_thread
+from config import auto_shutdown, is_game_running
 from parser import refresh_api_kills_cache
 import threading
 from setup_gui import setup_gui
@@ -46,16 +45,8 @@ if __name__ == '__main__':
 
     app, logger = setup_gui(game_running) # setup the GUI or logger
 
-    if game_running:
-        # log_file_location = set_sc_log_location()
-        # Start log monitoring in a separate thread
-        global_variables.set_log_file_location(set_sc_log_location()) # Set the log file location in global variables
-        log_file_location = global_variables.get_log_file_location()
-        if log_file_location:
-            rsi_handle = find_rsi_handle(log_file_location)
-            if rsi_handle:
-                start_tail_log_thread(log_file_location, rsi_handle)
-                game_heartbeat(1, True)
+    # Game services (log tail, heartbeat) are now started and managed by the GUI
+    # via a live status monitor in setup_gui. No need to start them here.
 
     # Refresh API kills cache in background so duplicate detection is ready
     try:

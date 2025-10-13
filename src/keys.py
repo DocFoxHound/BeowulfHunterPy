@@ -126,26 +126,11 @@ def activate_key(key_entry):
     else:
         global_variables.log("No key entered. Please input a valid key.")
 
-# Load existing key from the file
+        
+
+# Load Existing Key (UI-agnostic)
 @global_variables.log_exceptions
 def load_existing_key():
-    try:
-        with open("killtracker_key.cfg", "r") as f:
-            entered_key = f.readline().strip()
-            if entered_key:
-                api_key["value"] = entered_key
-                if validate_api_key(entered_key):
-                    global_variables.log("Servitor connection established")
-                else:
-                    global_variables.log("Invalid key. Please input a valid key")
-            else:
-                global_variables.log("No valid key found")
-    except FileNotFoundError:
-        global_variables.log("No existing key found")
-
-# Load Existing Key
-@global_variables.log_exceptions
-def load_existing_key(api_status_label, rsi_handle):
     try:
         with open("killtracker_key.cfg", "r") as f:
             entered_key = f.readline().strip()
@@ -155,7 +140,7 @@ def load_existing_key(api_status_label, rsi_handle):
                 return entered_key
             else:
                 global_variables.log("No valid key found. Please enter a key.")
-                api_status_label.config(text="API Status: Invalid", fg="red")
+                return None
     except FileNotFoundError:
         global_variables.log("No existing key found. Please enter a valid key.")
-        api_status_label.config(text="API Status: Invalid", fg="red")
+        return None
