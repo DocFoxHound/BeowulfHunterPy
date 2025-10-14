@@ -54,9 +54,17 @@ class KeyController:
                     self.key_section.pack_forget()
                 except Exception:
                     pass
+                # Populate main tab kills columns from API
+                try:
+                    self._populate_kills_from_api()
+                except Exception as e:
+                    self.log(f"Error populating kills from API: {e}")
                 # Now that key is validated, show the backup controls above the log
                 try:
-                    controls_parent = getattr(self.app, 'log_controls_container', None)
+                    # Prefer placing the button on the Functions tab controls
+                    controls_parent = getattr(self.app, 'functions_controls_container', None)
+                    if controls_parent is None:
+                        controls_parent = getattr(self.app, 'log_controls_container', None)
                     if self.log_text_area is not None:
                         backup_loader.create_load_prev_controls(self.app, self.log_text_area, getattr(self.app, 'BUTTON_STYLE', THEME_BUTTON_STYLE), controls_parent=controls_parent)
                 except Exception as e:
@@ -99,8 +107,15 @@ class KeyController:
                 self.key_section.pack_forget()
             except Exception:
                 pass
+            # Populate main tab kills columns from API
             try:
-                controls_parent = getattr(self.app, 'log_controls_container', None)
+                self._populate_kills_from_api()
+            except Exception as e:
+                self.log(f"Error populating kills from API: {e}")
+            try:
+                controls_parent = getattr(self.app, 'functions_controls_container', None)
+                if controls_parent is None:
+                    controls_parent = getattr(self.app, 'log_controls_container', None)
                 if self.log_text_area is not None:
                     backup_loader.create_load_prev_controls(self.app, self.log_text_area, getattr(self.app, 'BUTTON_STYLE', THEME_BUTTON_STYLE), controls_parent=controls_parent)
             except Exception as e:
@@ -216,3 +231,64 @@ class KeyController:
                 pass
             self._key_blink_job = None
         # Ensure final color is the 'bad' steady color only if not good; callers set good color
+
+    # --- Kills population helpers ---
+    def _populate_kills_from_api(self):
+        """Fetch kills using the API and render into the two columns."""
+        try:
+            # Ensure we have a user_id (set during validate_api_key)
+            # Fetch and classify
+            from parser import fetch_and_classify_api_kills_for_ui  # local import to avoid cycles
+        except Exception:
+            return
+
+        try:
+            pu, ac = fetch_and_classify_api_kills_for_ui()
+        except Exception:
+            pu, ac = [], []
+
+        # Get main tab references
+        try:
+            refs = getattr(self.app, 'main_tab_refs', {})
+            clear_pu = refs.get('clear_pu_kills')
+            clear_ac = refs.get('clear_ac_kills')
+            add_pu = refs.get('add_pu_kill_card')
+            add_ac = refs.get('add_ac_kill_card')
+            set_pu_count = refs.get('set_pu_kills_count')
+            set_ac_count = refs.get('set_ac_kills_count')
+        except Exception:
+            clear_pu = clear_ac = add_pu = add_ac = set_pu_count = set_ac_count = None
+
+        # Clear existing
+        try:
+            if callable(clear_pu):
+                clear_pu()
+        except Exception:
+            pass
+        try:
+            if callable(clear_ac):
+                clear_ac()
+        except Exception:
+            pass
+
+    # Update header counts (grand totals; display is capped separately at 10)
+        try:
+            if callable(set_pu_count):
+                set_pu_count(len(pu))
+        except Exception:
+            pass
+        try:
+            if callable(set_ac_count):
+                set_ac_count(len(ac))
+        except Exception:
+            pass
+
+        # Render new cards (victim + method icon)
+        # Instead of rendering directly, prefer to rebuild lists from combined all_kills
+        try:
+            refs = getattr(self.app, 'main_tab_refs', {})
+            refresh = refs.get('refresh_kill_columns')
+            if callable(refresh):
+                refresh()
+        except Exception:
+            pass

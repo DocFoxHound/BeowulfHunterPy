@@ -197,6 +197,15 @@ def create_load_prev_controls(app, text_area, button_style=None, controls_parent
                 pass
 
         def load_previous_logs():
+            # Auto-switch to the Log tab so the user can see progress
+            try:
+                nb = getattr(app, 'notebook', None)
+                tabs = getattr(app, 'tabs', {}) if nb is not None else {}
+                log_tab = tabs.get('log')
+                if nb is not None and log_tab is not None:
+                    nb.select(log_tab)
+            except Exception:
+                pass
             try:
                 load_prev_button.config(state=_tk.DISABLED)
             except Exception:

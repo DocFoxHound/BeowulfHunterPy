@@ -158,6 +158,154 @@ def get_user_kills_from_api(user_id):
 
 
 @global_variables.log_exceptions
+def fetch_and_classify_api_kills_for_ui(user_id=None):
+    """Fetch kills via API and prepare normalized records for the UI.
+
+    - Normalizes each item to a dict with keys: victim, time, zone, weapon,
+      game_mode, killers_ship, damage_type, source.
+    - Splits into PU vs AC lists using available fields (game_mode or zone heuristics).
+    - Stores results in global_variables (set_api_kills_data/set_api_kills_split).
+
+    Returns (pu_list, ac_list).
+    """
+    # Try to use configured user id if not provided
+    if not user_id:
+        try:
+            user_id = global_variables.get_user_id()
+        except Exception:
+            user_id = None
+
+    # If no user_id, nothing to fetch
+    if not user_id:
+        global_variables.set_api_kills_data([])
+        global_variables.set_api_kills_split([], [])
+        return ([], [])
+
+    # Ensure API key header ready
+    try:
+        key = global_variables.get_key()
+        api_key['value'] = key
+    except Exception:
+        pass
+
+    # Build request
+    url = f"https://beowulf.ironpoint.org/api/blackbox/user?user_id={user_id}"
+    headers = {}
+    if api_key.get('value'):
+        headers['Authorization'] = api_key['value']
+
+    data = None
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            global_variables.log(f"Failed to fetch user kills: {resp.status_code}")
+            global_variables.set_api_kills_data([])
+            global_variables.set_api_kills_split([], [])
+            return ([], [])
+        data = resp.json()
+    except Exception as e:
+        global_variables.log(f"Error fetching user kills from API: {e}")
+        global_variables.set_api_kills_data([])
+        global_variables.set_api_kills_split([], [])
+        return ([], [])
+
+    # Determine candidate list
+    if isinstance(data, dict):
+        candidates = data.get('kills') or data.get('data') or data.get('results') or data.get('items') or []
+    elif isinstance(data, list):
+        candidates = data
+    else:
+        candidates = []
+
+    normalized = []
+    api_like_items = []  # for api_kills_all schema
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        # Extract with fallbacks
+        victim = item.get('victim') or item.get('victim_name') or item.get('victimName')
+        if not victim and isinstance(item.get('victims'), (list, tuple)) and item.get('victims'):
+            try:
+                victim = item.get('victims')[0]
+            except Exception:
+                victim = None
+        time_val = item.get('timestamp') or item.get('time') or item.get('kill_time') or item.get('timestamp')
+        zone = item.get('zone') or item.get('location') or item.get('map')
+        weapon = item.get('weapon') or item.get('weapon_name')
+        game_mode_val = item.get('game_mode') or item.get('mode') or item.get('gameMode')
+        killers_ship = item.get('killers_ship') or item.get('ship') or item.get('ship_name')
+        # ship_killed indicates FPS vs ship kill per API; keep raw value
+        ship_killed = item.get('ship_killed') or item.get('shipKilled') or item.get('ship-killed')
+        damage_type = item.get('damage_type') or item.get('damageType')
+        # API-like fields commonly present; include with safe fallbacks
+        id_val = item.get('id') or item.get('_id') or None
+        user_id_val = item.get('user_id') or item.get('userId') or None
+        ship_used = item.get('ship_used') or item.get('killers_ship') or item.get('ship') or None
+        patch = item.get('patch') or None
+        value = item.get('value') if isinstance(item.get('value'), int) else 0
+        kill_count = item.get('kill_count') if isinstance(item.get('kill_count'), int) else 1
+        victims_list = item.get('victims') if isinstance(item.get('victims'), list) else ([victim] if victim else [])
+
+        rec = {
+            'victim': str(victim).strip() if victim else None,
+            'time': str(time_val).strip() if time_val else None,
+            'zone': str(zone).strip() if zone else None,
+            'weapon': str(weapon).strip() if weapon else None,
+            'game_mode': str(game_mode_val).strip() if game_mode_val else None,
+            'killers_ship': str(killers_ship).strip() if killers_ship else None,
+            'damage_type': str(damage_type).strip() if damage_type else None,
+            'ship_killed': str(ship_killed).strip() if ship_killed is not None else None,
+            'source': 'api'
+        }
+        # Skip entries with neither victim nor time; insufficient for display
+        if not rec['victim'] and not rec['time']:
+            continue
+        normalized.append(rec)
+
+        # Build API-like record for combined list
+        api_item = {
+            'id': str(id_val) if id_val is not None else None,
+            'user_id': str(user_id_val) if user_id_val is not None else None,
+            'ship_used': str(ship_used).strip() if ship_used else None,
+            'ship_killed': str(ship_killed).strip() if ship_killed is not None else None,
+            'value': int(value) if isinstance(value, int) else 0,
+            'kill_count': int(kill_count) if isinstance(kill_count, int) else 1,
+            'victims': victims_list,
+            'patch': str(patch) if patch is not None else None,
+            'game_mode': str(game_mode_val).strip() if game_mode_val else None,
+            'timestamp': str(time_val).strip() if time_val else None,
+        }
+        api_like_items.append(api_item)
+
+    # Heuristic split: prefer explicit game_mode; fallback to zone/map cues
+    pu_list, ac_list = [], []
+    for rec in normalized:
+        gm = (rec.get('game_mode') or '').lower()
+        z = (rec.get('zone') or '').lower()
+        is_ac = False
+        # Common AC indicators
+        if gm in ('arena_commander', 'ac', 'electronic_access', 'ea_starfighter', 'ea_duel', 'ea_freeflight', 'ea_vanduul_swarm'):
+            is_ac = True
+        elif 'arena' in z or 'dying star' in z or 'broken moon' in z or 'electronic access' in z:
+            is_ac = True
+        # Default to PU if not matched as AC
+        if is_ac:
+            ac_list.append(rec)
+        else:
+            pu_list.append(rec)
+
+    # Store for UI
+    global_variables.set_api_kills_data(normalized)
+    global_variables.set_api_kills_split(pu_list, ac_list)
+    # Also store the API-like combined list
+    try:
+        global_variables.set_api_kills_all(api_like_items)
+    except Exception:
+        pass
+    return (pu_list, ac_list)
+
+
+@global_variables.log_exceptions
 def refresh_api_kills_cache(user_id=None):
     """Refresh the in-memory API kills cache.
 
@@ -624,11 +772,56 @@ def parse_kill_line(line, target_name):
         'damage_type': damage_type
     }
 
-    # Delegate publishing to the centralized helper so there's a single upload path
+    # After recording to combined list, refresh UI lists from all_kills to avoid duplicates
+    try:
+        app = global_variables.get_app()
+        refs = global_variables.get_main_tab_refs()
+        refresh = refs.get('refresh_kill_columns')
+        if app is not None and callable(refresh):
+            try:
+                app.after(0, refresh)
+            except Exception:
+                refresh()
+        elif callable(refresh):
+            refresh()
+    except Exception:
+        pass
+
+    # Publish to API (network)
     try:
         publish_kill(json_data, suppress_logs=False)
     except Exception as e:
         global_variables.log(f"Error sending kill event: {e}")
+
+    # Append to combined in-memory list (API-like schema)
+    try:
+        existing = []
+        try:
+            existing = list(global_variables.get_api_kills_all())
+        except Exception:
+            existing = []
+        # Map live kill into the API-like schema
+        # Note: id and user_id may be unknown locally; leave as None.
+        # Derive ship_killed as 'FPS' if weapon/damage suggests FPS, else None to imply ship-based.
+        dt = (damage_type or '').lower()
+        fps_markers = ('bullet', 'melee', 'explosion', 'grenade', 'bleed', 'laser', 'railgun')
+        is_fps = any(m in dt for m in fps_markers) and (not (global_active_ship or '').strip() or (global_active_ship or '').strip().upper() == 'N/A')
+        api_like = {
+            'id': None,
+            'user_id': None,
+            'ship_used': global_active_ship if global_active_ship and global_active_ship != 'N/A' else None,
+            'ship_killed': 'FPS' if is_fps else None,
+            'value': 0,
+            'kill_count': 1,
+            'victims': [killed] if killed else [],
+            'patch': None,
+            'game_mode': global_game_mode,
+            'timestamp': kill_time,
+        }
+        existing.append(api_like)
+        global_variables.set_api_kills_all(existing)
+    except Exception:
+        pass
 
 
 @global_variables.log_exceptions

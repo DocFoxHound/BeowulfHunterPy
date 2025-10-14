@@ -40,8 +40,16 @@ key = None
 rsi_handle = None
 log_file_location = None
 user_id = None
+tk_app = None
+main_tab_refs = {}
 # When True, `log()` will suppress writing messages (useful during bulk ops)
 suppress_logs = False
+
+# API kills storage for UI population (fetched from remote API)
+api_kills_data = []        # full normalized list of kills
+api_kills_pu = []          # subset classified as PU
+api_kills_ac = []          # subset classified as AC
+api_kills_all = []         # combined list in API-like schema (API + live)
 
 def set_rsi_handle(handle):
     global rsi_handle
@@ -79,6 +87,31 @@ def get_log_file_location():
     return log_file_location
 
 
+def set_app(app):
+    """Store a reference to the Tk root app for cross-module UI scheduling."""
+    global tk_app
+    tk_app = app
+
+
+def get_app():
+    """Return the Tk app if set, else None."""
+    return tk_app
+
+
+def set_main_tab_refs(refs):
+    """Store refs returned by the Main tab builder for other modules (e.g., parser)."""
+    global main_tab_refs
+    try:
+        main_tab_refs = dict(refs) if refs is not None else {}
+    except Exception:
+        main_tab_refs = {}
+
+
+def get_main_tab_refs():
+    """Return the latest stored Main tab refs dict (may be empty)."""
+    return main_tab_refs
+
+
 def set_user_id(uid):
     """Set the current user id (geid or account id) used by other modules."""
     global user_id
@@ -88,6 +121,62 @@ def set_user_id(uid):
 def get_user_id():
     """Return the currently configured user id, or None if not set."""
     return user_id
+
+
+# --- API kills getters/setters for UI ---
+def set_api_kills_data(data_list):
+    """Set the full, normalized list of kills fetched from the API for UI use."""
+    global api_kills_data
+    try:
+        api_kills_data = list(data_list) if data_list is not None else []
+    except Exception:
+        api_kills_data = []
+
+
+def get_api_kills_data():
+    """Return the last fetched full normalized list of API kills for UI."""
+    return api_kills_data
+
+
+def set_api_kills_split(pu_list, ac_list):
+    """Store the PU/AC split lists for convenient UI consumption."""
+    global api_kills_pu, api_kills_ac
+    try:
+        api_kills_pu = list(pu_list) if pu_list is not None else []
+    except Exception:
+        api_kills_pu = []
+    try:
+        api_kills_ac = list(ac_list) if ac_list is not None else []
+    except Exception:
+        api_kills_ac = []
+
+
+def get_api_kills_split():
+    """Return a tuple (pu_list, ac_list) representing the last stored split."""
+    return api_kills_pu, api_kills_ac
+
+
+# --- Combined kills (API-like schema) ---
+def set_api_kills_all(items):
+    """Set the combined kills list (API + live) using the API-like schema.
+
+    Each item should be a dict like:
+    {
+        "id": str, "user_id": str, "ship_used": Optional[str], "ship_killed": Optional[str],
+        "value": int, "kill_count": int, "victims": List[str], "patch": str,
+        "game_mode": str, "timestamp": str
+    }
+    """
+    global api_kills_all
+    try:
+        api_kills_all = list(items) if items is not None else []
+    except Exception:
+        api_kills_all = []
+
+
+def get_api_kills_all():
+    """Return the combined kills list (API + live) in API-like schema."""
+    return api_kills_all
 
 
 def log(message):

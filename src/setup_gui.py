@@ -101,6 +101,11 @@ def setup_gui(game_running):
     # Build each tab's contents via modular builders
     main_refs = main_tab_builder.build(main_tab, app, banner_path=banner_path, update_message=update_message, on_update_click=open_github)
     setattr(app, 'main_tab_refs', main_refs)
+    try:
+        global_variables.set_app(app)
+        global_variables.set_main_tab_refs(main_refs)
+    except Exception:
+        pass
     graphs_refs = graphs_tab_builder.build(graphs_tab, app)
     log_refs = log_tab_builder.build(log_tab, app)
     functions_tab_builder.build(functions_tab)
