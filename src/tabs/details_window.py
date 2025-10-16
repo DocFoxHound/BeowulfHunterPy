@@ -69,10 +69,10 @@ def open_details_window(app):
         return box
 
     left_box = _make_stat_box(stats_row, "Top Victims", top_victims)
-    mid_box = _make_stat_box(stats_row, "Favorite Ships", top_fav_ships)
+    # mid_box = _make_stat_box(stats_row, "Favorite Ships", top_fav_ships)
     right_box = _make_stat_box(stats_row, "Top Ships Killed", top_ships)
     left_box.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4), anchor='n')
-    mid_box.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 4), anchor='n')
+    # mid_box.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 4), anchor='n')
     right_box.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0), anchor='n')
 
     # Below: single scrollable column with all kills (newest first)
@@ -110,14 +110,17 @@ def open_details_window(app):
         inner.bind('<Configure>', _update_scrollregion)
         canvas.bind('<Configure>', _resize_inner)
 
+        # Mouse wheel support — bind on canvas so it works over children
         def _on_mousewheel(event):
             try:
-                delta = -1 if event.delta > 0 else 1
-                canvas.yview_scroll(delta, 'units')
+                steps = int(-1 * (event.delta / 120)) if event.delta != 0 else 0
+                if steps:
+                    canvas.yview_scroll(steps, 'units')
             except Exception:
                 pass
-        inner.bind('<Enter>', lambda e: inner.bind_all('<MouseWheel>', _on_mousewheel))
-        inner.bind('<Leave>', lambda e: inner.unbind_all('<MouseWheel>'))
+
+        canvas.bind('<Enter>', lambda e: canvas.bind_all('<MouseWheel>', _on_mousewheel))
+        canvas.bind('<Leave>', lambda e: canvas.unbind_all('<MouseWheel>'))
 
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -200,8 +203,8 @@ def open_details_window(app):
             ship_used = rec.get('ship_used') or 'N/A'
             game_mode = rec.get('game_mode') or 'Unknown Mode'
             ts = rec.get('timestamp') or ''
-            secondary = f"Method: {ship_killed or 'Ship'}  |  Ship used: {ship_used}"
-            meta = f"{game_mode} • {ts}"
+            secondary = f"Killed in: {ship_killed or 'Ship'}  |  Game Mode: {game_mode}"
+            meta = f"{ts}"
             border = '#c9b037' if _is_recent(str(ts)) else None
             _add_card(all_col['container'], title, secondary, meta, icon, accent, border)
         except Exception:

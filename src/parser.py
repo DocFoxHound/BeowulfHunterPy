@@ -3,6 +3,7 @@ import json
 import requests
 import threading
 import time
+import re
 import global_variables
 from datetime import datetime, timezone, timedelta
 
@@ -11,6 +12,78 @@ api_key = {"value": None}
 # Cache of kills fetched from the API for the current run. Stored as set of
 # (victim, timestamp) tuples for fast duplicate checks by other functions.
 api_kills_cache = set()
+
+# Holds the most recent vehicle destruction context attributed to the local player,
+# so we can attach accurate location/coordinates to the next kill event.
+last_vehicle_context = {
+    'zone': None,          # e.g., 'ellis3'
+    'coordinates': None,   # e.g., "-580645.384869,141765.234817,806351.274790"
+    'time': None,          # timestamp string from the log line
+    'killer': None         # name of the player who caused the destruction
+}
+
+
+@global_variables.log_exceptions
+def update_vehicle_destruction_context(line, rsi_name=None):
+    """Parse a '<Vehicle Destruction>' log line and, if caused by the local player,
+    store its zone and coordinates for subsequent kill events.
+
+    Expected format example:
+    <2024-11-02T15:10:12.427Z> [Notice] <Vehicle Destruction> ... in zone 'ellis3' [pos x: -580645.384869, y: 141765.234817, z: 806351.274790 vel x: ...] ... caused by 'DocHound' [...]
+    """
+    try:
+        # Only consider lines that actually contain the marker
+        if "<Vehicle Destruction>" not in line:
+            return
+
+        # Extract the timestamp between leading < and >
+        timestamp_match = re.search(r"^<([^>]+)>", line)
+        ts = timestamp_match.group(1) if timestamp_match else None
+
+        # Extract the zone name inside in zone '...' (first occurrence)
+        zone_match = re.search(r"in zone '([^']+)'", line)
+        zone = zone_match.group(1) if zone_match else None
+
+        # Extract coordinates following [pos x: <x>, y: <y>, z: <z>
+        coords_match = re.search(r"\[pos x:\s*([-\d\.]+),\s*y:\s*([-\d\.]+),\s*z:\s*([-\d\.]+)", line)
+        coords = None
+        if coords_match:
+            try:
+                x, y, z = coords_match.group(1), coords_match.group(2), coords_match.group(3)
+                # Store as a compact comma-separated string for transport/UI simplicity
+                coords = f"{x},{y},{z}"
+            except Exception:
+                coords = None
+
+        # Extract the actor who caused the destruction: caused by 'NAME'
+        killer_match = re.search(r"caused by '([^']+)'", line)
+        caused_by = killer_match.group(1) if killer_match else None
+
+        # If we were given a target RSI name, only capture if this VD was caused by the local player
+        if rsi_name and caused_by and caused_by.lower() != str(rsi_name).lower():
+            return
+
+        # If we have at least zone or coordinates, store/update the context
+        if zone or coords:
+            last_vehicle_context['zone'] = zone
+            last_vehicle_context['coordinates'] = coords
+            last_vehicle_context['time'] = ts
+            last_vehicle_context['killer'] = caused_by
+            try:
+                # Keep this log light to avoid noise
+                if zone and coords:
+                    global_variables.log(f"Captured VD context — location: {zone}, coords: {coords}")
+                elif zone:
+                    global_variables.log(f"Captured VD context — location: {zone}")
+                elif coords:
+                    global_variables.log(f"Captured VD context — coords: {coords}")
+            except Exception:
+                pass
+    except Exception as e:
+        try:
+            global_variables.log(f"update_vehicle_destruction_context error: {e}")
+        except Exception:
+            pass
 
 
 @global_variables.log_exceptions
@@ -350,7 +423,7 @@ ignore_kill_substrings = [
 global_ship_list = [
     'DRAK', 'ORIG', 'AEGS', 'ANVL', 'CRUS', 'BANU', 'MISC',
     'KRIG', 'XNAA', 'ARGO', 'VNCL', 'ESPR', 'RSI', 'CNOU',
-    'GRIN', 'TMBL', 'GAMA'
+    'GRIN', 'TMBL', 'GAMA', 'GLSN'
 ]
 
 global_game_mode = "Nothing"
@@ -567,6 +640,16 @@ def parse_backup_logs(backup_dir, rsi_name, user_id=None, progress_callback=None
             if not suppress_file_logs:
                 global_variables.log(f"Parsing backup file: {fpath}")
 
+            # Reset vehicle destruction context at the start of each file so
+            # location/coordinates don't leak between unrelated sessions/files.
+            try:
+                last_vehicle_context['zone'] = None
+                last_vehicle_context['coordinates'] = None
+                last_vehicle_context['time'] = None
+                last_vehicle_context['killer'] = None
+            except Exception:
+                pass
+
             try:
                 with open(fpath, "rb") as fh:
                     base_offset = 0
@@ -649,6 +732,8 @@ def parse_backup_logs(backup_dir, rsi_name, user_id=None, progress_callback=None
                                                     'victim': parsed.get('victim'),
                                                     'time': parsed.get('time'),
                                                     'zone': parsed.get('zone'),
+                                                        'location': last_vehicle_context.get('zone'),
+                                                        'coordinates': last_vehicle_context.get('coordinates'),
                                                     'weapon': parsed.get('weapon'),
                                                     'rsi_profile': f"https://robertsspaceindustries.com/citizens/{parsed.get('victim')}",
                                                     'game_mode': global_game_mode,
@@ -764,6 +849,8 @@ def parse_kill_line(line, target_name):
         'victim': killed,
         'time': kill_time,
         'zone': killed_zone,
+        'location': last_vehicle_context.get('zone'),
+        'coordinates': last_vehicle_context.get('coordinates'),
         'weapon': weapon,
         'rsi_profile': f"https://robertsspaceindustries.com/citizens/{killed}",
         'game_mode': global_game_mode,
@@ -851,6 +938,8 @@ def parse_kill_local(line, target_name, suppress_logs=False):
             'victim': killed,
             'time': kill_time,
             'zone': killed_zone,
+            'location': last_vehicle_context.get('zone'),
+            'coordinates': last_vehicle_context.get('coordinates'),
             'weapon': weapon,
             'rsi_profile': f"https://robertsspaceindustries.com/citizens/{killed}",
             'game_mode': global_game_mode,
@@ -1000,6 +1089,9 @@ def read_log_line(line, rsi_name, upload_kills):
             set_player_zone(line)
         if -1 != line.find("CActor::Kill") and not check_substring_list(line, ignore_kill_substrings) and upload_kills:
             parse_kill_line(line, rsi_name)
+    # Capture Vehicle Destruction context whenever present; pass rsi_name so we can filter to local player
+    if -1 != line.find("<Vehicle Destruction>"):
+        update_vehicle_destruction_context(line, rsi_name)
     elif -1 != line.find("CPlayerShipRespawnManager::OnVehicleSpawned") and (
             "SC_Default" != global_game_mode) and (-1 != line.find(global_player_geid)):
         set_ac_ship(line)
@@ -1017,12 +1109,28 @@ def destroy_player_zone(line):
         global_variables.log(f"Ship Destroyed: {global_active_ship} with ID: {global_active_ship_id}")
         global_active_ship = "N/A"
         global_active_ship_id = "N/A"
+    # Reset any stale vehicle destruction context when our ship is destroyed
+    try:
+        last_vehicle_context['zone'] = None
+        last_vehicle_context['coordinates'] = None
+        last_vehicle_context['time'] = None
+        last_vehicle_context['killer'] = None
+    except Exception:
+        pass
 
 @global_variables.log_exceptions
 def set_ac_ship(line):
     global global_active_ship
     global_active_ship = line.split(' ')[5][1:-1]
     global_variables.log(f"Player has entered ship: {global_active_ship}")
+    # Reset VD context on new ship spawn to avoid mixing state across ships
+    try:
+        last_vehicle_context['zone'] = None
+        last_vehicle_context['coordinates'] = None
+        last_vehicle_context['time'] = None
+        last_vehicle_context['killer'] = None
+    except Exception:
+        pass
 
 @global_variables.log_exceptions
 def set_player_zone(line):

@@ -24,6 +24,12 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
         except Exception:
             pass
 
+        # Mark this container so builders can tailor layout (stack vertically with descriptions)
+        try:
+            setattr(controls_container, '_is_functions_controls_container', True)
+        except Exception:
+            pass
+
         refs['functions_controls_container'] = controls_container
     except Exception:
         pass

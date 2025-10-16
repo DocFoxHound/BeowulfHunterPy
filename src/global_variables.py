@@ -50,6 +50,8 @@ api_kills_data = []        # full normalized list of kills
 api_kills_pu = []          # subset classified as PU
 api_kills_ac = []          # subset classified as AC
 api_kills_all = []         # combined list in API-like schema (API + live)
+# General-purpose combined list of all kills, referenced by graphs tab
+all_kills = []
 
 def set_rsi_handle(handle):
     global rsi_handle
@@ -167,16 +169,42 @@ def set_api_kills_all(items):
         "game_mode": str, "timestamp": str
     }
     """
-    global api_kills_all
+    global api_kills_all, all_kills
     try:
         api_kills_all = list(items) if items is not None else []
+        # Keep all_kills in sync so other modules (e.g., graphs) can reference it
+        try:
+            all_kills = list(api_kills_all)
+        except Exception:
+            pass
     except Exception:
         api_kills_all = []
+        try:
+            all_kills = []
+        except Exception:
+            pass
 
 
 def get_api_kills_all():
     """Return the combined kills list (API + live) in API-like schema."""
     return api_kills_all
+
+
+# --- all_kills direct access (alias for api_kills_all) ---
+def set_all_kills(items):
+    """Set general-purpose all_kills list and keep api_kills_all in sync."""
+    global all_kills, api_kills_all
+    try:
+        all_kills = list(items) if items is not None else []
+        api_kills_all = list(all_kills)
+    except Exception:
+        all_kills = []
+        api_kills_all = []
+
+
+def get_all_kills():
+    """Return the general-purpose all_kills list (alias of api_kills_all)."""
+    return all_kills
 
 
 def log(message):

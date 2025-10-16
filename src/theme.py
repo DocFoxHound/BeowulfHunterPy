@@ -79,15 +79,15 @@ def apply_ttk_styles(app: tk.Misc) -> None:
         # Keep tab height consistent across states by fixing padding/expand for 'selected'
         try:
             style.map('Dark.TNotebook.Tab',
-                      background=[('selected', '#121212'), ('active', '#333333')],
-                      foreground=[('selected', '#ff6666')],
+                      background=[('disabled', '#1f1f1f'), ('selected', '#121212'), ('active', '#333333')],
+                      foreground=[('disabled', '#7a7a7a'), ('selected', '#ff6666')],
                       padding=[('selected', [10, 6])],
                       expand=[('selected', [0, 0, 0, 0])])
         except Exception:
             # Older Tk versions may not support mapping 'expand'; ensure at least padding is consistent
             style.map('Dark.TNotebook.Tab',
-                      background=[('selected', '#121212'), ('active', '#333333')],
-                      foreground=[('selected', '#ff6666')],
+                      background=[('disabled', '#1f1f1f'), ('selected', '#121212'), ('active', '#333333')],
+                      foreground=[('disabled', '#7a7a7a'), ('selected', '#ff6666')],
                       padding=[('selected', [10, 6])])
 
         # Dark frame for notebook pages

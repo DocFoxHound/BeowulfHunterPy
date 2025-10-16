@@ -121,6 +121,15 @@ def setup_gui(game_running):
     # status indicator (red/green) that updates as the game starts.
     initialize_game_gui(app)
 
+    # Ensure graph refreshes when user navigates to Graphs tab
+    try:
+        _bind_graphs_tab_refresh(app)
+    except Exception:
+        pass
+
+    # Ensure graph refreshes when user navigates to Graphs tab
+    _bind_graphs_tab_refresh(app)
+
     # No footer; notebook uses entire window
 
     # Lock the window size after layout so subsequent font changes inside
@@ -137,6 +146,37 @@ def setup_gui(game_running):
         pass
 
     return app, None
+
+
+@global_variables.log_exceptions
+def _bind_graphs_tab_refresh(app):
+    """Bind a handler to refresh the graph when the Graphs tab becomes active."""
+    try:
+        notebook = getattr(app, 'notebook', None)
+        tabs = getattr(app, 'tabs', {})
+        graphs_tab = tabs.get('graphs')
+        if not notebook or not graphs_tab:
+            return
+
+        def _on_tab_changed(event):
+            try:
+                current = notebook.select()
+                # When the graphs tab is selected, refresh the widget
+                if current == str(graphs_tab):
+                    gw = getattr(app, 'graph_widget', None)
+                    if gw is not None:
+                        gw.refresh()
+            except Exception:
+                pass
+
+        # Bind once
+        try:
+            notebook.unbind('<<NotebookTabChanged>>')
+        except Exception:
+            pass
+        notebook.bind('<<NotebookTabChanged>>', _on_tab_changed)
+    except Exception:
+        pass
 
 
 @global_variables.log_exceptions
@@ -219,8 +259,23 @@ def initialize_game_gui(app):
     # The 'Load Previous Logs' button is created in setup_gui() so it is visible
     # while waiting for the game; no need to recreate it here.
 
-    activate_button = tk.Button(key_section, text="Activate", command=key_controller.activate_key, **BUTTON_STYLE)
-    activate_button.pack(side=tk.LEFT, padx=(8, 0))
+    # Wire up the Activate button created in the main tab builder
+    try:
+        activate_button = _main_refs.get('activate_button')
+        if activate_button is not None:
+            activate_button.configure(command=key_controller.activate_key)
+    except Exception:
+        pass
+
+    # If the key section is visible (no/invalid key), ensure kill columns are hidden
+    try:
+        if key_section.winfo_ismapped():
+            refs = getattr(app, 'main_tab_refs', {})
+            hide_cols = refs.get('hide_kill_columns')
+            if callable(hide_cols):
+                hide_cols()
+    except Exception:
+        pass
 
     # Ensure the main window size is fixed after layout so changing the
     # text widget font size doesn't cause the toplevel to resize.

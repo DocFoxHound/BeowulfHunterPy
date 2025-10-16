@@ -3,7 +3,7 @@ from typing import Optional
 
 import backup_loader
 import global_variables
-from config import get_player_name
+from config import get_player_name, set_sc_log_location, find_rsi_handle
 from keys import validate_api_key, save_api_key, load_existing_key
 from theme import BUTTON_STYLE as THEME_BUTTON_STYLE
 
@@ -18,6 +18,39 @@ class KeyController:
         self._key_blink_job = None
         self._key_blink_state = False
         self._key_good = False
+
+    def _set_tabs_enabled(self, enabled: bool):
+        """Enable or disable the Graphs and Functions tabs.
+        If disabling and one of those tabs is selected, switch back to Main.
+        """
+        try:
+            nb = getattr(self.app, 'notebook', None)
+            tabs = getattr(self.app, 'tabs', {})
+            graphs_tab = tabs.get('graphs')
+            functions_tab = tabs.get('functions')
+            main_tab = tabs.get('main')
+            if nb is None:
+                return
+            state = 'normal' if enabled else 'disabled'
+            try:
+                if graphs_tab is not None:
+                    nb.tab(graphs_tab, state=state)
+            except Exception:
+                pass
+            try:
+                if functions_tab is not None:
+                    nb.tab(functions_tab, state=state)
+            except Exception:
+                pass
+            if not enabled:
+                try:
+                    current = nb.select()
+                    if current in (str(graphs_tab), str(functions_tab)) and main_tab is not None:
+                        nb.select(main_tab)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def log(self, msg: str):
         try:
@@ -44,6 +77,16 @@ class KeyController:
             self.key_section.pack()
         except Exception:
             pass
+        # While the key section is visible (awaiting a valid key), hide the kill columns
+        try:
+            refs = getattr(self.app, 'main_tab_refs', {})
+            hide_cols = refs.get('hide_kill_columns')
+            if callable(hide_cols):
+                hide_cols()
+        except Exception:
+            pass
+        # Also disable non-essential tabs until a valid key is present
+        self._set_tabs_enabled(False)
         current_handle = global_variables.get_rsi_handle()
         saved_key = load_existing_key()
         if saved_key:
@@ -54,6 +97,16 @@ class KeyController:
                     self.key_section.pack_forget()
                 except Exception:
                     pass
+                # Show the columns now that a valid key exists
+                try:
+                    refs = getattr(self.app, 'main_tab_refs', {})
+                    show_cols = refs.get('show_kill_columns')
+                    if callable(show_cols):
+                        show_cols()
+                except Exception:
+                    pass
+                # Re-enable tabs
+                self._set_tabs_enabled(True)
                 # Populate main tab kills columns from API
                 try:
                     self._populate_kills_from_api()
@@ -77,6 +130,8 @@ class KeyController:
         else:
             self.log("No key found. Please enter a key.")
             self._update_key_indicator(False)
+            # Ensure tabs remain disabled when no key exists
+            self._set_tabs_enabled(False)
 
     def activate_key(self):
         try:
@@ -87,17 +142,47 @@ class KeyController:
         if not entered_key:
             self.log("No key entered. Please input a valid key.")
             self._update_key_indicator(False)
+            # Keep columns hidden while waiting for a valid key
+            try:
+                refs = getattr(self.app, 'main_tab_refs', {})
+                hide_cols = refs.get('hide_kill_columns')
+                if callable(hide_cols):
+                    hide_cols()
+            except Exception:
+                pass
+            # Keep tabs disabled
+            self._set_tabs_enabled(False)
             return
 
+        # Snapshot current state, and if missing, try to discover on-demand
         current_log, current_handle, current_player = self._current_state()
         if not current_log:
-            self.log("Log file location not found.")
-            self._update_key_indicator(False)
-            return
+            try:
+                potential_log = set_sc_log_location()
+                if potential_log:
+                    global_variables.set_log_file_location(potential_log)
+                    current_log = potential_log
+            except Exception:
+                pass
+        if current_log and not current_handle:
+            try:
+                rh = find_rsi_handle(current_log)
+                if rh:
+                    global_variables.set_rsi_handle(rh)
+                    current_handle = rh
+            except Exception:
+                pass
+        if current_log and not current_player:
+            try:
+                current_player = get_player_name(current_log)
+            except Exception:
+                current_player = None
+
+        # Do not hard-block on missing log/handle; we can still validate the key.
+        if not current_log:
+            self.log("Log file location not found yet. We'll still try to validate your key; start Star Citizen for full functionality.")
         if not current_player:
-            self.log("RSI Handle not found. Please ensure the game is running and the log file is accessible.")
-            self._update_key_indicator(False)
-            return
+            self.log("RSI Handle not detected yet. Key validation can proceed; start the game to enable kill tracking.")
 
         if validate_api_key(entered_key, current_handle):
             save_api_key(entered_key)
@@ -107,6 +192,16 @@ class KeyController:
                 self.key_section.pack_forget()
             except Exception:
                 pass
+            # Show the columns once activated
+            try:
+                refs = getattr(self.app, 'main_tab_refs', {})
+                show_cols = refs.get('show_kill_columns')
+                if callable(show_cols):
+                    show_cols()
+            except Exception:
+                pass
+            # Enable tabs now that key is active
+            self._set_tabs_enabled(True)
             # Populate main tab kills columns from API
             try:
                 self._populate_kills_from_api()
@@ -124,6 +219,16 @@ class KeyController:
         else:
             self.log("Invalid key. Please enter a valid API key.")
             self._update_key_indicator(False)
+            # Keep columns hidden on invalid key
+            try:
+                refs = getattr(self.app, 'main_tab_refs', {})
+                hide_cols = refs.get('hide_kill_columns')
+                if callable(hide_cols):
+                    hide_cols()
+            except Exception:
+                pass
+            # Keep tabs disabled
+            self._set_tabs_enabled(False)
 
     # --- Key indicator management ---
     def setup_key_indicator(self):

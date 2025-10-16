@@ -97,13 +97,17 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
     key_section = tk.Frame(parent, bg="#1a1a1a")
     key_section.pack(side=tk.TOP, fill=tk.X, padx=6, pady=6)
 
+    # Center container for key widgets (keeps label+entry centered horizontally)
+    key_center = tk.Frame(key_section, bg="#1a1a1a")
+    key_center.pack(side=tk.TOP)
+
     key_label = tk.Label(
-        key_section, text="Enter Key:", font=("Times New Roman", 12), fg="#ffffff", bg="#1a1a1a"
+        key_center, text="Enter Key:", font=("Times New Roman", 12), fg="#ffffff", bg="#1a1a1a"
     )
     key_label.pack(side=tk.LEFT, padx=(0, 8))
 
     key_entry = tk.Entry(
-        key_section,
+        key_center,
         width=30,
         font=("Times New Roman", 12),
         highlightthickness=2,
@@ -114,6 +118,35 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
         insertbackground="#ff5555"
     )
     key_entry.pack(side=tk.LEFT)
+
+    # Activate button (kept centered alongside the key entry)
+    try:
+        act_style = getattr(app, 'BUTTON_STYLE', {})
+    except Exception:
+        act_style = {}
+    activate_button = tk.Button(key_center, text="Activate", **act_style)
+    activate_button.pack(side=tk.LEFT, padx=(8, 0))
+
+    # Help/instructions shown when a key is required
+    try:
+        help_text = (
+            "How to get a key:\n"
+            "1. Open the IronPoint Discord\n"
+            "2. In any channel, type /key-create\n"
+            "3. Copy-paste the key into the field above"
+        )
+        key_help_label = tk.Label(
+            key_section,
+            text=help_text,
+            font=("Times New Roman", 12),
+            fg="#bcbcd8",
+            bg="#1a1a1a",
+            justify="left",
+            wraplength=600,
+        )
+        key_help_label.pack(side=tk.TOP, pady=(6, 2))
+    except Exception:
+        key_help_label = None
 
     # API status label removed in favor of banner indicator square
 
@@ -165,16 +198,18 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
         inner.bind('<Configure>', _update_scrollregion)
         canvas.bind('<Configure>', _resize_inner)
 
-        # Mouse wheel support (Windows)
+        # Mouse wheel support (bind on canvas so it remains active over child widgets)
         def _on_mousewheel(event):
             try:
-                delta = -1 if event.delta > 0 else 1
-                canvas.yview_scroll(delta, 'units')
+                # On Windows, event.delta is a multiple of 120 per notch
+                steps = int(-1 * (event.delta / 120)) if event.delta != 0 else 0
+                if steps:
+                    canvas.yview_scroll(steps, 'units')
             except Exception:
                 pass
 
-        inner.bind('<Enter>', lambda e: inner.bind_all('<MouseWheel>', _on_mousewheel))
-        inner.bind('<Leave>', lambda e: inner.unbind_all('<MouseWheel>'))
+        canvas.bind('<Enter>', lambda e: canvas.bind_all('<MouseWheel>', _on_mousewheel))
+        canvas.bind('<Leave>', lambda e: canvas.unbind_all('<MouseWheel>'))
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vbar.pack(side=tk.RIGHT, fill=tk.Y)
 
@@ -236,30 +271,7 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
         if meta_text:
             tk.Label(body, text=meta_text, font=("Times New Roman", 10), fg=colors['muted'], bg=colors['card_bg']).pack(anchor='w', pady=(2, 0))
 
-        # Ensure mouse wheel scroll works when hovering over this card (and its children)
-        try:
-            canvas = container.master if isinstance(container.master, tk.Canvas) else None
-            if canvas is not None:
-                def _card_on_mousewheel(event, c=canvas):
-                    try:
-                        delta = -1 if event.delta > 0 else 1
-                        c.yview_scroll(delta, 'units')
-                    except Exception:
-                        pass
-                def _bind_wheel_recursive(w):
-                    try:
-                        w.bind('<Enter>', lambda e: canvas.bind_all('<MouseWheel>', _card_on_mousewheel))
-                        w.bind('<Leave>', lambda e: canvas.unbind_all('<MouseWheel>'))
-                    except Exception:
-                        pass
-                    try:
-                        for ch in w.winfo_children():
-                            _bind_wheel_recursive(ch)
-                    except Exception:
-                        pass
-                _bind_wheel_recursive(card)
-        except Exception:
-            pass
+        # Mouse wheel is handled at the canvas level; no per-card bindings needed
 
         # Insert at top (newest first) or append to bottom
         if insert_top:
@@ -296,6 +308,36 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
     middle_col = tk.Frame(columns_frame, bg="#1a1a1a")
     middle_col.grid(row=0, column=1, sticky='n', padx=4)
     right_col['outer'].grid(row=0, column=2, sticky='nsew', padx=(4, 0))
+
+    # Helpers to show/hide the PU/AC columns and the Details button (used when key entry is visible)
+    def hide_kill_columns():
+        try:
+            left_col['outer'].grid_remove()
+        except Exception:
+            pass
+        try:
+            right_col['outer'].grid_remove()
+        except Exception:
+            pass
+        try:
+            middle_col.grid_remove()
+        except Exception:
+            pass
+
+    def show_kill_columns():
+        try:
+            # grid_remove remembers placement; calling grid() restores it
+            left_col['outer'].grid()
+        except Exception:
+            pass
+        try:
+            right_col['outer'].grid()
+        except Exception:
+            pass
+        try:
+            middle_col.grid()
+        except Exception:
+            pass
 
     # Details window helper
     # Use external details window module
@@ -514,8 +556,14 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
     widgets.update({
         'key_section': key_section,
         'key_entry': key_entry,
+        'activate_button': activate_button,
+    'key_help_label': key_help_label,
         'pu_kills_frame': left_col['container'],
         'ac_kills_frame': right_col['container'],
+        'pu_kills_outer': left_col['outer'],
+        'ac_kills_outer': right_col['outer'],
+    'details_container': middle_col,
+    'details_button': details_btn,
         'add_pu_kill_card': add_pu_kill_card,
         'add_ac_kill_card': add_ac_kill_card,
         'clear_pu_kills': clear_pu_kills,
@@ -525,5 +573,7 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
         'set_ac_kills_count': set_ac_kills_count,
         'inc_pu_kills_count': inc_pu_kills_count,
         'inc_ac_kills_count': inc_ac_kills_count,
+        'hide_kill_columns': hide_kill_columns,
+        'show_kill_columns': show_kill_columns,
     })
     return widgets
