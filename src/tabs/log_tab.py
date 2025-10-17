@@ -23,6 +23,11 @@ def build(parent: tk.Misc, app) -> Dict[str, Any]:
     log_controls_container = tk.Frame(parent, bg="#1a1a1a", highlightthickness=1, highlightbackground="#2a2a2a")
     log_controls_container.pack(side=tk.TOP, fill=tk.X, padx=0, pady=(0, 4))
     setattr(app, 'log_controls_container', log_controls_container)
+    # Mark container so loaders can tailor layout (stack/inlined as needed for log tab)
+    try:
+        setattr(log_controls_container, '_is_log_controls_container', True)
+    except Exception:
+        pass
 
     # Log text area
     log_text_container = tk.Frame(parent, bg="#1a1a1a")
@@ -45,6 +50,12 @@ def build(parent: tk.Misc, app) -> Dict[str, Any]:
 
     # Register as logger
     global_variables.set_logger(text_area)
+
+    # Create the "Load Previous Logs" controls inside the Log tab controls container
+    try:
+        backup_loader.create_load_prev_controls(app, text_area, getattr(app, 'BUTTON_STYLE', BUTTON_STYLE), controls_parent=log_controls_container)
+    except Exception:
+        pass
 
     refs.update({
         'log_controls_container': log_controls_container,

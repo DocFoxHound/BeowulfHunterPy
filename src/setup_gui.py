@@ -20,7 +20,8 @@ import parser
 import graphs
 from tabs import main_tab as main_tab_builder
 from tabs import graphs_tab as graphs_tab_builder
-from tabs import functions_tab as functions_tab_builder
+from tabs import piracy_tab as piracy_tab_builder
+from tabs import dogfighting_tab as dogfighting_tab_builder
 from tabs import log_tab as log_tab_builder
 from controllers.key_controller import KeyController
 from controllers.game_controller import GameController
@@ -67,7 +68,7 @@ def setup_gui(game_running):
     except Exception:
         pass
 
-    # Tabs: Main, Graphs, Functions, Log
+    # Tabs: Main, Graphs, Piracy, Dogfighting, Log
     notebook = ttk.Notebook(app, style='Dark.TNotebook')
     try:
         notebook.configure(takefocus=0)
@@ -79,12 +80,14 @@ def setup_gui(game_running):
         pass
     main_tab = ttk.Frame(notebook, style='Dark.TFrame')
     graphs_tab = ttk.Frame(notebook, style='Dark.TFrame')
-    functions_tab = ttk.Frame(notebook, style='Dark.TFrame')
+    piracy_tab = ttk.Frame(notebook, style='Dark.TFrame')
+    dogfighting_tab = ttk.Frame(notebook, style='Dark.TFrame')
     log_tab = ttk.Frame(notebook, style='Dark.TFrame')
 
     notebook.add(main_tab, text="Main")
     notebook.add(graphs_tab, text="Graphs")
-    notebook.add(functions_tab, text="Functions")
+    notebook.add(piracy_tab, text="Piracy")
+    notebook.add(dogfighting_tab, text="Dogfighting")
     notebook.add(log_tab, text="Log")
     # Make the notebook fill the entire application window
     notebook.pack(padx=0, pady=0, fill=tk.BOTH, expand=True)
@@ -94,7 +97,8 @@ def setup_gui(game_running):
     setattr(app, 'tabs', {
         'main': main_tab,
         'graphs': graphs_tab,
-        'functions': functions_tab,
+        'piracy': piracy_tab,
+        'dogfighting': dogfighting_tab,
         'log': log_tab,
     })
 
@@ -108,7 +112,10 @@ def setup_gui(game_running):
         pass
     graphs_refs = graphs_tab_builder.build(graphs_tab, app)
     log_refs = log_tab_builder.build(log_tab, app)
-    functions_tab_builder.build(functions_tab)
+    piracy_refs = piracy_tab_builder.build(piracy_tab)
+    dogfighting_refs = dogfighting_tab_builder.build(dogfighting_tab)
+    setattr(app, 'piracy_tab_refs', piracy_refs)
+    setattr(app, 'dogfighting_tab_refs', dogfighting_refs)
 
     # Make the logger reference easily available
     text_area = log_refs.get('log_text_area')
@@ -256,8 +263,8 @@ def initialize_game_gui(app):
     # Automatically validate the saved key
     key_controller.validate_saved_key()
 
-    # The 'Load Previous Logs' button is created in setup_gui() so it is visible
-    # while waiting for the game; no need to recreate it here.
+    # The 'Load Previous Logs' button is created by the Log tab builder; no need to
+    # recreate it here.
 
     # Wire up the Activate button created in the main tab builder
     try:

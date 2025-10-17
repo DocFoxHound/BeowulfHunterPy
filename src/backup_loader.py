@@ -13,23 +13,33 @@ def create_load_prev_controls(app, text_area, button_style=None, controls_parent
     a single-line loading progress. The button is disabled while parsing.
     """
     try:
+        # Prevent duplicate creation if called multiple times
+        try:
+            if getattr(app, '_load_prev_controls_created', False):
+                return
+        except Exception:
+            pass
+
         parent = controls_parent if controls_parent is not None else getattr(text_area, 'master', app)
         control_frame = _tk.Frame(parent, bg="#1a1a1a")
 
-        # Determine if we're inside the Functions tab controls container and
-        # use a stacked layout (button over description). Otherwise keep compact inline layout.
-        in_functions_controls = False
+        # Determine if we're inside a dedicated controls container (Functions/Piracy in past, Log now)
+        # and use a stacked layout (button over description). Otherwise keep compact inline layout.
+        stacked_controls = False
         try:
-            in_functions_controls = bool(getattr(parent, '_is_functions_controls_container', False))
+            stacked_controls = bool(
+                getattr(parent, '_is_functions_controls_container', False) or
+                getattr(parent, '_is_log_controls_container', False)
+            )
         except Exception:
-            in_functions_controls = False
+            stacked_controls = False
 
         try:
             if controls_parent is None:
                 control_frame.pack(pady=(5, 0), before=text_area)
             else:
-                # In the functions tab, stack full-width rows; elsewhere keep inline-left placement
-                if in_functions_controls:
+                # In dedicated control containers, stack full-width rows; elsewhere keep inline-left placement
+                if stacked_controls:
                     control_frame.pack(side=_tk.TOP, fill=_tk.X, padx=6, pady=(6, 0))
                 else:
                     control_frame.pack(side=_tk.LEFT, padx=(5, 0), pady=(5, 0))
@@ -48,9 +58,9 @@ def create_load_prev_controls(app, text_area, button_style=None, controls_parent
 
         tk = os.sys.modules['tkinter']
         # Build button + description UI
-        btn_row = control_frame if in_functions_controls else control_frame
+        btn_row = control_frame
         load_prev_button = tk.Button(btn_row, text="Load Previous Logs", **bstyle)
-        if in_functions_controls:
+        if stacked_controls:
             # Place button on its own line for clarity
             load_prev_button.pack(side=_tk.LEFT, padx=(6, 6), pady=(6, 2))
         else:
@@ -63,7 +73,7 @@ def create_load_prev_controls(app, text_area, button_style=None, controls_parent
                 "Use this after activating your API key to pull in any kills recorded in previous sessions.\n"
                 "If available, logs are read from a 'logbackups' folder next to your current Star Citizen log file."
             )
-            if in_functions_controls:
+            if stacked_controls:
                 desc = tk.Label(control_frame, text=desc_text, justify=_tk.LEFT, anchor='w',
                                  bg="#1a1a1a", fg="#bcbcd8", wraplength=560, font=("Times New Roman", 10))
                 desc.pack(side=_tk.TOP, fill=_tk.X, padx=12, pady=(0, 8))
@@ -250,6 +260,12 @@ def create_load_prev_controls(app, text_area, button_style=None, controls_parent
             threading.Thread(target=_load_backups_worker, daemon=True).start()
 
         load_prev_button.config(command=load_previous_logs)
+
+        # Mark created so subsequent calls are no-ops
+        try:
+            setattr(app, '_load_prev_controls_created', True)
+        except Exception:
+            pass
 
     except Exception as e:
         global_variables.log(f"Failed to create Load Previous Logs controls: {e}")

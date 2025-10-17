@@ -20,14 +20,14 @@ class KeyController:
         self._key_good = False
 
     def _set_tabs_enabled(self, enabled: bool):
-        """Enable or disable the Graphs and Functions tabs.
+        """Enable or disable the Graphs and Piracy tabs.
         If disabling and one of those tabs is selected, switch back to Main.
         """
         try:
             nb = getattr(self.app, 'notebook', None)
             tabs = getattr(self.app, 'tabs', {})
             graphs_tab = tabs.get('graphs')
-            functions_tab = tabs.get('functions')
+            functions_tab = tabs.get('piracy')
             main_tab = tabs.get('main')
             if nb is None:
                 return
@@ -114,10 +114,7 @@ class KeyController:
                     self.log(f"Error populating kills from API: {e}")
                 # Now that key is validated, show the backup controls above the log
                 try:
-                    # Prefer placing the button on the Functions tab controls
-                    controls_parent = getattr(self.app, 'functions_controls_container', None)
-                    if controls_parent is None:
-                        controls_parent = getattr(self.app, 'log_controls_container', None)
+                    controls_parent = getattr(self.app, 'log_controls_container', None)
                     if self.log_text_area is not None:
                         backup_loader.create_load_prev_controls(self.app, self.log_text_area, getattr(self.app, 'BUTTON_STYLE', THEME_BUTTON_STYLE), controls_parent=controls_parent)
                 except Exception as e:
@@ -208,9 +205,7 @@ class KeyController:
             except Exception as e:
                 self.log(f"Error populating kills from API: {e}")
             try:
-                controls_parent = getattr(self.app, 'functions_controls_container', None)
-                if controls_parent is None:
-                    controls_parent = getattr(self.app, 'log_controls_container', None)
+                controls_parent = getattr(self.app, 'log_controls_container', None)
                 if self.log_text_area is not None:
                     backup_loader.create_load_prev_controls(self.app, self.log_text_area, getattr(self.app, 'BUTTON_STYLE', THEME_BUTTON_STYLE), controls_parent=controls_parent)
             except Exception as e:

@@ -45,6 +45,9 @@ main_tab_refs = {}
 # When True, `log()` will suppress writing messages (useful during bulk ops)
 suppress_logs = False
 
+# Current game patch version (e.g., "4.3") discovered from remote API
+patch_version = None
+
 # API kills storage for UI population (fetched from remote API)
 api_kills_data = []        # full normalized list of kills
 api_kills_pu = []          # subset classified as PU
@@ -123,6 +126,21 @@ def set_user_id(uid):
 def get_user_id():
     """Return the currently configured user id, or None if not set."""
     return user_id
+
+
+# --- Patch version getters/setters ---
+def set_patch_version(patch: str):
+    """Store the latest game patch version string (e.g., '4.3')."""
+    global patch_version
+    try:
+        patch_version = str(patch) if patch is not None else None
+    except Exception:
+        patch_version = None
+
+
+def get_patch_version():
+    """Return the last stored game patch version string, or None if unknown."""
+    return patch_version
 
 
 # --- API kills getters/setters for UI ---
