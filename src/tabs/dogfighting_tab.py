@@ -80,7 +80,8 @@ def _make_listbox_section(master: tk.Misc, title: str) -> Dict[str, Any]:
                         text_val = str(value)
                 except Exception:
                     text_val = str(value)
-                lb.insert(tk.END, f"{i}. {name} - {text_val}")
+                # Show value before the name so the important number is visible even if truncated
+                lb.insert(tk.END, f"{i}. {text_val} - {name}")
             _reset_row_styles()
         except Exception:
             pass
@@ -97,7 +98,8 @@ def _make_listbox_section(master: tk.Misc, title: str) -> Dict[str, Any]:
                         text_val = str(value)
                 except Exception:
                     text_val = str(value)
-                lb.insert(tk.END, f"{i}. {name} - {text_val}")
+                # Show value before the name so the important number is visible even if truncated
+                lb.insert(tk.END, f"{i}. {text_val} - {name}")
             _reset_row_styles()
         except Exception:
             pass
@@ -183,15 +185,19 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
     tr['outer'].grid(row=0, column=1, sticky='nsew', padx=(3, 0), pady=(0, 3))
     refs['pirate_hits_leaderboard'] = tr
 
-    # Bottom-left: FPS Kills (AC)
-    bl_ac = _make_listbox_section(charts_outer, "FPS Kills (AC)")
-    bl_ac['outer'].grid(row=1, column=0, sticky='nsew', padx=(0, 3), pady=(3, 0))
-    refs['fps_kills_ac'] = bl_ac
+    # Bottom-left: Ship Kills (AC)
+    bl_ship_ac = _make_listbox_section(charts_outer, "Ship Kills (AC)")
+    bl_ship_ac['outer'].grid(row=1, column=0, sticky='nsew', padx=(0, 3), pady=(3, 0))
+    # Back-compat aliases plus new keys
+    refs['ship_kills_ac'] = bl_ship_ac
+    refs['fps_kills_ac'] = bl_ship_ac
 
-    # Bottom-right: FPS Kills (PU)
-    bl_pu = _make_listbox_section(charts_outer, "FPS Kills (PU)")
-    bl_pu['outer'].grid(row=1, column=1, sticky='nsew', padx=(3, 0), pady=(3, 0))
-    refs['fps_kills_pu'] = bl_pu
+    # Bottom-right: Ship Kills (PU)
+    bl_ship_pu = _make_listbox_section(charts_outer, "Ship Kills (PU)")
+    bl_ship_pu['outer'].grid(row=1, column=1, sticky='nsew', padx=(3, 0), pady=(3, 0))
+    # Back-compat aliases plus new keys
+    refs['ship_kills_pu'] = bl_ship_pu
+    refs['fps_kills_pu'] = bl_ship_pu
 
     # Right-side Actions strip
     br_outer = tk.Frame(content_container, bg=COLORS['bg'], highlightthickness=1, highlightbackground=COLORS['border'])
@@ -263,6 +269,16 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
                 except Exception:
                     name_map = {}
 
+                # Ensure current user's nickname is shown even if not in filtered cache
+                try:
+                    cur_uid = gv.get_user_id()
+                    if cur_uid:
+                        friendly = ironpoint_api.get_user_display_name_fallback(cur_uid)
+                        if isinstance(friendly, str) and friendly and friendly != cur_uid:
+                            name_map[str(cur_uid)] = friendly
+                except Exception:
+                    pass
+
                 # Replace IDs with display names
                 stolen_items = [(name_map.get(n, n), v) for n, v in stolen_items]
                 hits_items = [(name_map.get(n, n), v) for n, v in hits_items]
@@ -283,7 +299,7 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
             except Exception:
                 pass
 
-            # FPS kills from blackbox rows
+            # Ship kills from blackbox rows (fallback to FPS kills if ship_* fields not present)
             try:
                 ac_items = []
                 pu_items = []
@@ -291,8 +307,9 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
                 pu_ids: List[str] = []
                 for r in blackbox_rows:
                     user_ident = r.get("user_id") or r.get("player_id") or ""
-                    ac = r.get("fps_kills_ac", 0) or 0
-                    pu = r.get("fps_kills_pu", 0) or 0
+                    # Prefer ship_kills_* fields; gracefully fall back to fps_kills_*
+                    ac = r.get("ship_kills_ac", r.get("fps_kills_ac", 0)) or 0
+                    pu = r.get("ship_kills_pu", r.get("fps_kills_pu", 0)) or 0
                     try:
                         ac = int(ac)
                     except Exception:
@@ -305,12 +322,22 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
                     pu_items.append((user_ident or "Unknown", pu))
                     ac_ids.append(str(user_ident))
                     pu_ids.append(str(user_ident))
-                # Resolve names for FPS lists
+                # Resolve names for ship kill lists
                 try:
                     ids_for_names = [n for n, _ in ac_items] + [n for n, _ in pu_items]
                     name_map = ironpoint_api.resolve_user_display_names(ids_for_names)
                 except Exception:
                     name_map = {}
+
+                # Ensure current user's nickname is shown even if not in filtered cache
+                try:
+                    cur_uid = gv.get_user_id()
+                    if cur_uid:
+                        friendly = ironpoint_api.get_user_display_name_fallback(cur_uid)
+                        if isinstance(friendly, str) and friendly and friendly != cur_uid:
+                            name_map[str(cur_uid)] = friendly
+                except Exception:
+                    pass
 
                 ac_items = [(name_map.get(n, n), v) for n, v in ac_items]
                 pu_items = [(name_map.get(n, n), v) for n, v in pu_items]
@@ -325,8 +352,8 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
                 ac_items, ac_ids = _sort_with_ids(ac_items, ac_ids)
                 pu_items, pu_ids = _sort_with_ids(pu_items, pu_ids)
 
-                bl_ac['set_items_and_ids'](ac_items[:100], ac_ids[:100])
-                bl_pu['set_items_and_ids'](pu_items[:100], pu_ids[:100])
+                bl_ship_ac['set_items_and_ids'](ac_items[:100], ac_ids[:100])
+                bl_ship_pu['set_items_and_ids'](pu_items[:100], pu_ids[:100])
             except Exception:
                 pass
 
@@ -336,8 +363,8 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
                 if current_uid:
                     tl['highlight_user'](current_uid)
                     tr['highlight_user'](current_uid)
-                    bl_ac['highlight_user'](current_uid)
-                    bl_pu['highlight_user'](current_uid)
+                    bl_ship_ac['highlight_user'](current_uid)
+                    bl_ship_pu['highlight_user'](current_uid)
             except Exception:
                 pass
 
@@ -378,8 +405,8 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
         try:
             tl['clear']()
             tr['clear']()
-            bl_ac['clear']()
-            bl_pu['clear']()
+            bl_ship_ac['clear']()
+            bl_ship_pu['clear']()
         except Exception:
             pass
 
@@ -390,17 +417,27 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
     def set_pirate_hits(items: List[Tuple[str, Any]]):
         tr['set_items'](items)
 
+    # New ship kill setters
+    def set_ship_kills_ac(items: List[Tuple[str, Any]]):
+        bl_ship_ac['set_items'](items)
+
+    def set_ship_kills_pu(items: List[Tuple[str, Any]]):
+        bl_ship_pu['set_items'](items)
+
+    # Back-compat FPS kill setter names route to the same sections
     def set_fps_kills_ac(items: List[Tuple[str, Any]]):
-        bl_ac['set_items'](items)
+        bl_ship_ac['set_items'](items)
 
     def set_fps_kills_pu(items: List[Tuple[str, Any]]):
-        bl_pu['set_items'](items)
+        bl_ship_pu['set_items'](items)
 
     refs.update({
         'set_uec_stolen': set_uec_stolen,
         'set_pirate_hits': set_pirate_hits,
-        'set_fps_kills_ac': set_fps_kills_ac,
-        'set_fps_kills_pu': set_fps_kills_pu,
+        'set_ship_kills_ac': set_ship_kills_ac,
+        'set_ship_kills_pu': set_ship_kills_pu,
+        'set_fps_kills_ac': set_fps_kills_ac,  # alias
+        'set_fps_kills_pu': set_fps_kills_pu,  # alias
         'clear_all_dogfighting_lists': _placeholder_clear,
     })
 

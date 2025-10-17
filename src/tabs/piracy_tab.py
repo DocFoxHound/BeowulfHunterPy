@@ -84,7 +84,8 @@ def _make_listbox_section(master: tk.Misc, title: str) -> Dict[str, Any]:
                         text_val = str(value)
                 except Exception:
                     text_val = str(value)
-                lb.insert(tk.END, f"{i}. {name} - {text_val}")
+                # Show value before the name so the important number is visible even if truncated
+                lb.insert(tk.END, f"{i}. {text_val} - {name}")
             _reset_row_styles()
         except Exception:
             pass
@@ -101,7 +102,8 @@ def _make_listbox_section(master: tk.Misc, title: str) -> Dict[str, Any]:
                         text_val = str(value)
                 except Exception:
                     text_val = str(value)
-                lb.insert(tk.END, f"{i}. {name} - {text_val}")
+                # Show value before the name so the important number is visible even if truncated
+                lb.insert(tk.END, f"{i}. {text_val} - {name}")
             _reset_row_styles()
         except Exception:
             pass
@@ -266,6 +268,16 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
                 except Exception:
                     name_map = {}
 
+                # Ensure current user's nickname is shown even if not in filtered cache
+                try:
+                    cur_uid = gv.get_user_id()
+                    if cur_uid:
+                        friendly = ironpoint_api.get_user_display_name_fallback(cur_uid)
+                        if isinstance(friendly, str) and friendly and friendly != cur_uid:
+                            name_map[str(cur_uid)] = friendly
+                except Exception:
+                    pass
+
                 # Replace IDs with display names
                 stolen_items = [(name_map.get(n, n), v) for n, v in stolen_items]
                 hits_items = [(name_map.get(n, n), v) for n, v in hits_items]
@@ -317,6 +329,16 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
                     name_map = ironpoint_api.resolve_user_display_names(ids_for_names)
                 except Exception:
                     name_map = {}
+
+                # Ensure current user's nickname is shown even if not in filtered cache
+                try:
+                    cur_uid = gv.get_user_id()
+                    if cur_uid:
+                        friendly = ironpoint_api.get_user_display_name_fallback(cur_uid)
+                        if isinstance(friendly, str) and friendly and friendly != cur_uid:
+                            name_map[str(cur_uid)] = friendly
+                except Exception:
+                    pass
 
                 ac_items = [(name_map.get(n, n), v) for n, v in ac_items]
                 pu_items = [(name_map.get(n, n), v) for n, v in pu_items]
