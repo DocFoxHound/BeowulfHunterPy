@@ -1,6 +1,7 @@
 import tkinter as tk
 from typing import Dict, Any, List, Tuple
 import threading
+import graphs
 
 import global_variables as gv
 try:
@@ -175,15 +176,19 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
     except Exception:
         pass
 
-    # Top-left: Most aUEC Stolen (duplicated from Piracy UI)
-    tl = _make_listbox_section(charts_outer, "Most aUEC Stolen")
+    # Top-left: Top Ranked Arena Commander (by rating)
+    tl = _make_listbox_section(charts_outer, "Squadron Battle - Top Rated")
     tl['outer'].grid(row=0, column=0, sticky='nsew', padx=(0, 3), pady=(0, 3))
+    # Keep old key for back-compat and provide a clearer alias
     refs['au_ec_leaderboard'] = tl
+    refs['top_ranked_ac_leaderboard'] = tl
 
-    # Top-right: Most Pirate Hits Made (duplicated from Piracy UI)
-    tr = _make_listbox_section(charts_outer, "Most Pirate Hits Made")
+    # Top-right: Most PU damages
+    tr = _make_listbox_section(charts_outer, "Most PU Damages")
     tr['outer'].grid(row=0, column=1, sticky='nsew', padx=(3, 0), pady=(0, 3))
+    # Keep old key for back-compat and provide a clearer alias
     refs['pirate_hits_leaderboard'] = tr
+    refs['pu_damages_leaderboard'] = tr
 
     # Bottom-left: Ship Kills (AC)
     bl_ship_ac = _make_listbox_section(charts_outer, "Ship Kills (AC)")
@@ -240,31 +245,38 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
 
             # Build leaderboards
             try:
-                stolen_items = []  # (display_name, value)
-                hits_items = []    # (display_name, value)
-                stolen_ids: List[str] = []
-                hits_ids: List[str] = []
-                for r in piracy_rows:
-                    user_ident = r.get("player_id") or r.get("user_id") or ""
-                    total_value = r.get("total_value", 0) or 0
-                    hits_created = r.get("hits_created", 0) or 0
-                    # Coerce strings to ints if necessary
+                # Top-right: Most PU $ in Damages (from blackbox summary value_pu)
+                damages_items = []    # (display_name, value_pu)
+                damages_ids: List[str] = []
+                for r in blackbox_rows:
+                    user_ident = r.get("user_id") or r.get("player_id") or ""
+                    value_pu = r.get("value_pu", 0) or 0
                     try:
-                        total_value = int(total_value)
+                        value_pu = int(value_pu)
                     except Exception:
-                        total_value = 0
+                        try:
+                            value_pu = float(value_pu)
+                        except Exception:
+                            value_pu = 0
+                    damages_items.append((user_ident or "Unknown", value_pu))
+                    damages_ids.append(str(user_ident))
+
+                # Top-left: Top Ranked Arena Commander (by rating from blackbox summary)
+                rating_items = []  # (display_name, rating)
+                rating_ids: List[str] = []
+                for r in blackbox_rows:
+                    user_ident = r.get("user_id") or r.get("player_id") or ""
+                    rating = r.get("rating", 0) or 0
                     try:
-                        hits_created = int(hits_created)
+                        rating = float(rating)
                     except Exception:
-                        hits_created = 0
-                    stolen_items.append((user_ident or "Unknown", total_value))
-                    hits_items.append((user_ident or "Unknown", hits_created))
-                    stolen_ids.append(str(user_ident))
-                    hits_ids.append(str(user_ident))
+                        rating = 0.0
+                    rating_items.append((user_ident or "Unknown", rating))
+                    rating_ids.append(str(user_ident))
 
                 # Resolve display names for all unique IDs used in these lists
                 try:
-                    ids_for_names = [n for n, _ in stolen_items] + [n for n, _ in hits_items]
+                    ids_for_names = [n for n, _ in rating_items] + [n for n, _ in damages_items]
                     name_map = ironpoint_api.resolve_user_display_names(ids_for_names)
                 except Exception:
                     name_map = {}
@@ -279,9 +291,22 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
                 except Exception:
                     pass
 
-                # Replace IDs with display names
-                stolen_items = [(name_map.get(n, n), v) for n, v in stolen_items]
-                hits_items = [(name_map.get(n, n), v) for n, v in hits_items]
+                # Filter out entries without a proper nickname mapping
+                def _filter_and_map(items, ids, mapping):
+                    new_items = []
+                    new_ids = []
+                    try:
+                        for (raw_name, val), rid in zip(items, ids):
+                            disp = mapping.get(rid)
+                            if isinstance(disp, str) and disp.strip() and disp != rid:
+                                new_items.append((disp, val))
+                                new_ids.append(rid)
+                    except Exception:
+                        pass
+                    return new_items, new_ids
+
+                rating_items, rating_ids = _filter_and_map(rating_items, rating_ids, name_map)
+                damages_items, damages_ids = _filter_and_map(damages_items, damages_ids, name_map)
 
                 # Sort desc and keep ids aligned
                 def _sort_with_ids(items, ids):
@@ -291,11 +316,41 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
                     sorted_ids = [p[1] for p in pairs]
                     return sorted_items, sorted_ids
 
-                stolen_items, stolen_ids = _sort_with_ids(stolen_items, stolen_ids)
-                hits_items, hits_ids = _sort_with_ids(hits_items, hits_ids)
+                rating_items, rating_ids = _sort_with_ids(rating_items, rating_ids)
+                damages_items, damages_ids = _sort_with_ids(damages_items, damages_ids)
 
-                tl['set_items_and_ids'](stolen_items[:100], stolen_ids[:100])
-                tr['set_items_and_ids'](hits_items[:100], hits_ids[:100])
+                # Format ratings with no decimal places (rounded) for display only
+                rating_items_display: List[Tuple[str, Any]] = []
+                try:
+                    for name, val in rating_items[:100]:
+                        try:
+                            # Round to nearest whole number and add commas
+                            rounded = int(round(float(val)))
+                            text_val = f"{rounded:,}"
+                        except Exception:
+                            text_val = str(val)
+                        rating_items_display.append((name, text_val))
+                except Exception:
+                    rating_items_display = [(name, str(val)) for name, val in rating_items[:100]]
+
+                # Format damages with a leading $ for display only
+                damages_items_display: List[Tuple[str, Any]] = []
+                try:
+                    for name, val in damages_items[:100]:
+                        try:
+                            if isinstance(val, int):
+                                text_val = f"${val:,}"
+                            else:
+                                # floats or other numerics
+                                text_val = f"${float(val):,.2f}"
+                        except Exception:
+                            text_val = f"${val}"
+                        damages_items_display.append((name, text_val))
+                except Exception:
+                    damages_items_display = [(name, f"${val}") for name, val in damages_items[:100]]
+
+                tl['set_items_and_ids'](rating_items_display, rating_ids[:100])
+                tr['set_items_and_ids'](damages_items_display, damages_ids[:100])
             except Exception:
                 pass
 
@@ -339,8 +394,22 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
                 except Exception:
                     pass
 
-                ac_items = [(name_map.get(n, n), v) for n, v in ac_items]
-                pu_items = [(name_map.get(n, n), v) for n, v in pu_items]
+                # Filter out entries without a proper nickname mapping
+                def _filter_and_map(items, ids, mapping):
+                    new_items = []
+                    new_ids = []
+                    try:
+                        for (raw_name, val), rid in zip(items, ids):
+                            disp = mapping.get(rid)
+                            if isinstance(disp, str) and disp.strip() and disp != rid:
+                                new_items.append((disp, val))
+                                new_ids.append(rid)
+                    except Exception:
+                        pass
+                    return new_items, new_ids
+
+                ac_items, ac_ids = _filter_and_map(ac_items, ac_ids, name_map)
+                pu_items, pu_ids = _filter_and_map(pu_items, pu_ids, name_map)
 
                 def _sort_with_ids(items, ids):
                     pairs = list(zip(items, ids))
@@ -446,13 +515,86 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
     refresh_btn.pack(side=tk.TOP, fill=tk.X, padx=0, pady=(0, 6))
     clear_btn = tk.Button(btns, text="Clear", command=_placeholder_clear, **btn_style)
     clear_btn.pack(side=tk.TOP, fill=tk.X, padx=0, pady=(0, 6))
-    settings_btn = tk.Button(btns, text="Settings…", command=lambda: None, **btn_style)
-    settings_btn.pack(side=tk.TOP, fill=tk.X, padx=0, pady=(0, 6))
+    # Graphs popup
+    graphs_window_ref = {'win': None, 'widget': None}
+
+    def _open_graphs_window():
+        try:
+            # Reuse if already open
+            win = graphs_window_ref.get('win')
+            if win is not None and win.winfo_exists():
+                try:
+                    win.deiconify()
+                    win.lift()
+                    win.focus_force()
+                except Exception:
+                    pass
+                # Ensure refresh on reuse
+                gw = graphs_window_ref.get('widget')
+                try:
+                    if gw:
+                        gw.refresh(force=True)
+                except Exception:
+                    pass
+                return
+
+            # Create new toplevel
+            win = tk.Toplevel(parent)
+            win.title("BeowulfHunter – Graphs")
+            try:
+                win.configure(bg=COLORS['bg'])
+            except Exception:
+                pass
+            # Nice default size; resizable
+            try:
+                win.geometry("700x520")
+            except Exception:
+                pass
+            win.resizable(True, True)
+
+            # Container for the graph widget
+            container = tk.Frame(win, bg=COLORS['bg'])
+            container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+            try:
+                gw = graphs.GraphWidget(container)
+                graphs_window_ref['widget'] = gw
+            except Exception:
+                tk.Label(container, text="Graph unavailable", fg=COLORS['muted'], bg=COLORS['bg']).pack(padx=6, pady=6, anchor='nw')
+                graphs_window_ref['widget'] = None
+
+            graphs_window_ref['win'] = win
+
+            def _on_close():
+                try:
+                    graphs_window_ref['win'] = None
+                    graphs_window_ref['widget'] = None
+                except Exception:
+                    pass
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
+
+            try:
+                win.protocol("WM_DELETE_WINDOW", _on_close)
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                gv.log(f"Failed to open graphs window: {e}")
+            except Exception:
+                pass
+
+    graphs_btn = tk.Button(btns, text="Graphs", command=_open_graphs_window, **btn_style)
+    graphs_btn.pack(side=tk.TOP, fill=tk.X, padx=0, pady=(0, 6))
 
     refs.update({
         'refresh_button': refresh_btn,
         'clear_button': clear_btn,
-        'settings_button': settings_btn,
+        'graphs_button': graphs_btn,
+        'open_graphs_window': _open_graphs_window,
+        'graphs_window_ref': graphs_window_ref,
     })
 
     # Seed with example data so the UI looks alive on first open

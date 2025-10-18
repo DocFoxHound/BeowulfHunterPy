@@ -20,23 +20,17 @@ class KeyController:
         self._key_good = False
 
     def _set_tabs_enabled(self, enabled: bool):
-        """Enable or disable the Graphs and Piracy tabs.
+        """Enable or disable non-essential tabs (currently Piracy).
         If disabling and one of those tabs is selected, switch back to Main.
         """
         try:
             nb = getattr(self.app, 'notebook', None)
             tabs = getattr(self.app, 'tabs', {})
-            graphs_tab = tabs.get('graphs')
             functions_tab = tabs.get('piracy')
             main_tab = tabs.get('main')
             if nb is None:
                 return
             state = 'normal' if enabled else 'disabled'
-            try:
-                if graphs_tab is not None:
-                    nb.tab(graphs_tab, state=state)
-            except Exception:
-                pass
             try:
                 if functions_tab is not None:
                     nb.tab(functions_tab, state=state)
@@ -45,7 +39,7 @@ class KeyController:
             if not enabled:
                 try:
                     current = nb.select()
-                    if current in (str(graphs_tab), str(functions_tab)) and main_tab is not None:
+                    if current in (str(functions_tab),) and main_tab is not None:
                         nb.select(main_tab)
                 except Exception:
                     pass

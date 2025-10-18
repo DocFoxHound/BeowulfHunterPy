@@ -278,9 +278,22 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
                 except Exception:
                     pass
 
-                # Replace IDs with display names
-                stolen_items = [(name_map.get(n, n), v) for n, v in stolen_items]
-                hits_items = [(name_map.get(n, n), v) for n, v in hits_items]
+                # Filter out any entries that don't resolve to a proper nickname
+                def _filter_and_map(items, ids, mapping):
+                    new_items = []
+                    new_ids = []
+                    try:
+                        for (raw_name, val), rid in zip(items, ids):
+                            disp = mapping.get(rid)
+                            if isinstance(disp, str) and disp.strip() and disp != rid:
+                                new_items.append((disp, val))
+                                new_ids.append(rid)
+                    except Exception:
+                        pass
+                    return new_items, new_ids
+
+                stolen_items, stolen_ids = _filter_and_map(stolen_items, stolen_ids, name_map)
+                hits_items, hits_ids = _filter_and_map(hits_items, hits_ids, name_map)
 
                 # Sort desc
                 stolen_items.sort(key=lambda x: x[1], reverse=True)
@@ -340,8 +353,22 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
                 except Exception:
                     pass
 
-                ac_items = [(name_map.get(n, n), v) for n, v in ac_items]
-                pu_items = [(name_map.get(n, n), v) for n, v in pu_items]
+                # Filter out entries with no proper nickname mapping
+                def _filter_and_map(items, ids, mapping):
+                    new_items = []
+                    new_ids = []
+                    try:
+                        for (raw_name, val), rid in zip(items, ids):
+                            disp = mapping.get(rid)
+                            if isinstance(disp, str) and disp.strip() and disp != rid:
+                                new_items.append((disp, val))
+                                new_ids.append(rid)
+                    except Exception:
+                        pass
+                    return new_items, new_ids
+
+                ac_items, ac_ids = _filter_and_map(ac_items, ac_ids, name_map)
+                pu_items, pu_ids = _filter_and_map(pu_items, pu_ids, name_map)
 
                 # Keep ids aligned with sorted items
                 def _sort_with_ids(items, ids):

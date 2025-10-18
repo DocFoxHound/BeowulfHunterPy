@@ -17,9 +17,7 @@ import tempfile
 import threading
 import time
 import parser
-import graphs
 from tabs import main_tab as main_tab_builder
-from tabs import graphs_tab as graphs_tab_builder
 from tabs import piracy_tab as piracy_tab_builder
 from tabs import dogfighting_tab as dogfighting_tab_builder
 from tabs import log_tab as log_tab_builder
@@ -68,7 +66,7 @@ def setup_gui(game_running):
     except Exception:
         pass
 
-    # Tabs: Main, Graphs, Piracy, Dogfighting, Log
+    # Tabs: Main, Piracy, Dogfighting, Log
     notebook = ttk.Notebook(app, style='Dark.TNotebook')
     try:
         notebook.configure(takefocus=0)
@@ -79,13 +77,11 @@ def setup_gui(game_running):
     except Exception:
         pass
     main_tab = ttk.Frame(notebook, style='Dark.TFrame')
-    graphs_tab = ttk.Frame(notebook, style='Dark.TFrame')
     piracy_tab = ttk.Frame(notebook, style='Dark.TFrame')
     dogfighting_tab = ttk.Frame(notebook, style='Dark.TFrame')
     log_tab = ttk.Frame(notebook, style='Dark.TFrame')
 
     notebook.add(main_tab, text="Main")
-    notebook.add(graphs_tab, text="Graphs")
     notebook.add(piracy_tab, text="Piracy")
     notebook.add(dogfighting_tab, text="Dogfighting")
     notebook.add(log_tab, text="Log")
@@ -96,7 +92,6 @@ def setup_gui(game_running):
     setattr(app, 'notebook', notebook)
     setattr(app, 'tabs', {
         'main': main_tab,
-        'graphs': graphs_tab,
         'piracy': piracy_tab,
         'dogfighting': dogfighting_tab,
         'log': log_tab,
@@ -110,7 +105,6 @@ def setup_gui(game_running):
         global_variables.set_main_tab_refs(main_refs)
     except Exception:
         pass
-    graphs_refs = graphs_tab_builder.build(graphs_tab, app)
     log_refs = log_tab_builder.build(log_tab, app)
     piracy_refs = piracy_tab_builder.build(piracy_tab)
     dogfighting_refs = dogfighting_tab_builder.build(dogfighting_tab)
@@ -128,14 +122,7 @@ def setup_gui(game_running):
     # status indicator (red/green) that updates as the game starts.
     initialize_game_gui(app)
 
-    # Ensure graph refreshes when user navigates to Graphs tab
-    try:
-        _bind_graphs_tab_refresh(app)
-    except Exception:
-        pass
-
-    # Ensure graph refreshes when user navigates to Graphs tab
-    _bind_graphs_tab_refresh(app)
+    # (Graphs tab removed; no refresh binding needed)
 
     # No footer; notebook uses entire window
 
@@ -155,35 +142,7 @@ def setup_gui(game_running):
     return app, None
 
 
-@global_variables.log_exceptions
-def _bind_graphs_tab_refresh(app):
-    """Bind a handler to refresh the graph when the Graphs tab becomes active."""
-    try:
-        notebook = getattr(app, 'notebook', None)
-        tabs = getattr(app, 'tabs', {})
-        graphs_tab = tabs.get('graphs')
-        if not notebook or not graphs_tab:
-            return
-
-        def _on_tab_changed(event):
-            try:
-                current = notebook.select()
-                # When the graphs tab is selected, refresh the widget
-                if current == str(graphs_tab):
-                    gw = getattr(app, 'graph_widget', None)
-                    if gw is not None:
-                        gw.refresh()
-            except Exception:
-                pass
-
-        # Bind once
-        try:
-            notebook.unbind('<<NotebookTabChanged>>')
-        except Exception:
-            pass
-        notebook.bind('<<NotebookTabChanged>>', _on_tab_changed)
-    except Exception:
-        pass
+    
 
 
 @global_variables.log_exceptions
@@ -219,21 +178,7 @@ def initialize_game_gui(app):
     log_file_location = global_variables.get_log_file_location()
     rsi_handle = global_variables.get_rsi_handle()
 
-    # Ensure the Graphs tab contains the graph widget
-    try:
-        tabs = getattr(app, 'tabs', {})
-        graphs_tab = tabs.get('graphs')
-        if graphs_tab is not None and getattr(app, 'graph_widget', None) is None:
-            graph_container = tk.Frame(graphs_tab, bg="#1a1a1a")
-            graph_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-            try:
-                gw = graphs.GraphWidget(graph_container)
-                setattr(app, 'graph_widget', gw)
-            except Exception:
-                # Fallback placeholder if GraphWidget fails
-                tk.Label(graph_container, text="Graph unavailable", fg="#bcbcd8", bg="#1a1a1a").pack(padx=6, pady=6, anchor='nw')
-    except Exception:
-        pass
+    # Graphs are now shown via a popup from the Dogfighting tab; Graphs tab remains as a notice only.
 
     # No header; indicator will render inside banner on Main tab via GameController
 

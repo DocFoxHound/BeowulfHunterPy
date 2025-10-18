@@ -1,4 +1,6 @@
 import requests
+from datetime import datetime, timedelta, timezone
+import time
 from packaging import version as pkg_version
 from typing import List, Dict, Any, Optional, Iterable
 from functools import lru_cache
@@ -20,6 +22,7 @@ ALLOWED_RANK_IDS = {
 # In-memory caches for user data
 _FILTERED_USER_ID_TO_NAME: Dict[str, str] = {}
 _ALL_USERS_FETCHED: bool = False
+_SUMMARY_CACHE: Dict[tuple, tuple] = {}
 
 
 def _get_json(url: str, timeout: float = 8.0) -> Any:
@@ -129,6 +132,47 @@ def _ensure_filtered_users_loaded(timeout: float = 20.0) -> None:
         _ALL_USERS_FETCHED = True
 
 
+@lru_cache(maxsize=128)
+def _get_patch_id_for_version(version_str: str, timeout: float = 8.0) -> Optional[str]:
+    """Return the id for a given patch version string using the gameversion API.
+
+    If the exact version isn't found, returns None.
+    """
+    if not version_str:
+        return None
+    try:
+        url = f"{BASE_URL}/gameversion/"
+        data = _get_json(url, timeout=timeout)
+        if not isinstance(data, list):
+            return None
+        for item in data:
+            try:
+                if str(item.get("version", "")).strip() == str(version_str).strip():
+                    pid = item.get("id")
+                    if pid is None:
+                        return None
+                    return str(pid)
+            except Exception:
+                continue
+        return None
+    except Exception:
+        return None
+
+
+def _tomorrow_utc_ms() -> int:
+    """Compute 'tomorrow' timestamp in milliseconds (UTC)."""
+    try:
+        dt = datetime.now(timezone.utc) + timedelta(days=1)
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        # Fallback to current time + 1 day in ms if timezone utilities fail
+        try:
+            return int((datetime.utcnow() + timedelta(days=1)).timestamp() * 1000)
+        except Exception:
+            # Last resort: a fixed 24h ahead from epoch 0
+            return 86_400_000
+
+
 def get_latest_patch_version(timeout: float = 8.0) -> Optional[str]:
     """Return the highest 'version' value from the gameversion API as a string.
 
@@ -156,29 +200,131 @@ def get_latest_patch_version(timeout: float = 8.0) -> Optional[str]:
 
 
 def get_piracy_summary(patch: str, timeout: float = 12.0) -> List[Dict[str, Any]]:
-    """Fetch piracy summary leaderboard for a given patch.
+    """Fetch piracy-like summary for a patch using the Beowulf Hunter endpoint.
 
-    Returns a list of dict entries with keys like:
-    player_id, patch, hits_created, air_count, ground_count, mixed_count,
-    brute_force_count, extortion_count, total_value
+    This now sources data from
+    /beowulfhuntersummarybypatch/patch/{patch}?start={patch_id}&end={tomorrow_ms}
+    and adapts the rows to the legacy shape expected by the UI.
     """
     if not patch:
         return []
-    url = f"{BASE_URL}/leaderboardpiracysummary/patch/{patch}"
-    data = _get_json(url, timeout=timeout)
-    return data if isinstance(data, list) else []
+    # Use shared combined summary cache to avoid duplicate HTTP calls
+    def _get_shared_data() -> List[Dict[str, Any]]:
+        pid = _get_patch_id_for_version(patch, timeout=timeout)
+        start_param = str(pid) if pid is not None else "0"
+        cache_key = ("beowulf", patch, start_param)
+        now = time.time()
+        cached = _SUMMARY_CACHE.get(cache_key)
+        # 30s TTL to share across tabs and functions
+        if cached and (now - cached[0] < 30):
+            return cached[1]  # type: ignore[index]
+        end_ms = _tomorrow_utc_ms()
+        url = f"{BASE_URL}/beowulfhuntersummarybypatch/patch/{patch}?start={start_param}&end={end_ms}"
+        data = _get_json(url, timeout=timeout)
+        rows = data if isinstance(data, list) else []
+        _SUMMARY_CACHE[cache_key] = (now, rows)
+        return rows
+
+    data = _get_shared_data()
+
+    out: List[Dict[str, Any]] = []
+    for row in data:
+        try:
+            if not isinstance(row, dict):
+                continue
+            uid = row.get("user_id") or row.get("player_id") or row.get("id")
+            # Map values, defaulting to 0 if missing/None
+            def _ival(x):
+                try:
+                    return int(x)
+                except Exception:
+                    return 0
+            # Per requirement: hits_created is the sum of brute_force_count + extortion_count
+            brute = _ival(row.get("brute_force_count"))
+            extort = _ival(row.get("extortion_count"))
+            hits_sum = brute + extort
+
+            item = {
+                "player_id": str(uid) if uid is not None else "",
+                "user_id": str(uid) if uid is not None else "",
+                "patch": patch,
+                "hits_created": hits_sum,
+                "air_count": _ival(row.get("air_count")),
+                "ground_count": _ival(row.get("ground_count")),
+                "mixed_count": _ival(row.get("mixed_count")),
+                "brute_force_count": brute,
+                "extortion_count": extort,
+                # Prefer total_value if provided; otherwise try value_pu + value_ac
+                "total_value": _ival(row.get("total_value"))
+                                or (_ival(row.get("value_pu")) + _ival(row.get("value_ac"))),
+            }
+            out.append(item)
+        except Exception:
+            continue
+    return out
 
 
 def get_blackbox_summary(patch: str, timeout: float = 12.0) -> List[Dict[str, Any]]:
-    """Fetch blackbox summary (kills/value) for a given patch.
+    """Fetch blackbox-like summary for a patch using the Beowulf Hunter endpoint.
 
-    Returns a list of dicts with keys such as user_id, fps_kills_ac, fps_kills_pu, etc.
+    This adapts rows to include fields used by the UI: fps_kills_* and ship_kills_*.
     """
     if not patch:
         return []
-    url = f"{BASE_URL}/leaderboardblackboxsummary/patch/{patch}"
-    data = _get_json(url, timeout=timeout)
-    return data if isinstance(data, list) else []
+    # Reuse the same shared combined summary used by piracy
+    def _get_shared_data() -> List[Dict[str, Any]]:
+        pid = _get_patch_id_for_version(patch, timeout=timeout)
+        start_param = str(pid) if pid is not None else "0"
+        cache_key = ("beowulf", patch, start_param)
+        now = time.time()
+        cached = _SUMMARY_CACHE.get(cache_key)
+        if cached and (now - cached[0] < 30):
+            return cached[1]  # type: ignore[index]
+        end_ms = _tomorrow_utc_ms()
+        url = f"{BASE_URL}/beowulfhuntersummarybypatch/patch/{patch}?start={start_param}&end={end_ms}"
+        data = _get_json(url, timeout=timeout)
+        rows = data if isinstance(data, list) else []
+        _SUMMARY_CACHE[cache_key] = (now, rows)
+        return rows
+
+    data = _get_shared_data()
+
+    out: List[Dict[str, Any]] = []
+    for row in data:
+        try:
+            if not isinstance(row, dict):
+                continue
+            uid = row.get("user_id") or row.get("player_id") or row.get("id")
+            def _ival(x):
+                try:
+                    return int(x)
+                except Exception:
+                    return 0
+            def _fval(x):
+                try:
+                    return float(x)
+                except Exception:
+                    return 0.0
+            item = {
+                "user_id": str(uid) if uid is not None else "",
+                "player_id": str(uid) if uid is not None else "",
+                # Provide both ship and fps fields; UI will pick what it needs
+                "fps_kills_total": _ival(row.get("fps_kills_total")),
+                "fps_kills_pu": _ival(row.get("fps_kills_pu")),
+                "fps_kills_ac": _ival(row.get("fps_kills_ac")),
+                "ship_kills_total": _ival(row.get("ship_kills_total")),
+                "ship_kills_pu": _ival(row.get("ship_kills_pu")),
+                "ship_kills_ac": _ival(row.get("ship_kills_ac")),
+                # Values by mode if present
+                "value_pu": _ival(row.get("value_pu")),
+                "value_ac": _ival(row.get("value_ac")),
+                # Ranked Arena Commander rating if present
+                "rating": _fval(row.get("rating")),
+            }
+            out.append(item)
+        except Exception:
+            continue
+    return out
 
 
 # --- Users ---
