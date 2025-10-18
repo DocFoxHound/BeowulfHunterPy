@@ -538,21 +538,26 @@ def read_existing_log(log_file_location, rsi_name):
 
 @global_variables.log_exceptions
 def parse_backup_logs(backup_dir, rsi_name, user_id=None, progress_callback=None, suppress_file_logs=False):
-    """Parse all log files in the backup_dir without uploading kills.
+    """Parse all log files in the backup_dir and attempt to upload non-duplicate kills.
 
-    This will iterate all files in the directory and parse each as a log file.
-    Kills are parsed but not sent to the server (upload_kills=False).
+    - Iterates files in the directory and parses each as a log file. Live upload
+      behavior (network POST) is controlled by presence of an API key; if no key
+      is configured, uploads will be skipped but kills will still be parsed.
+    - Duplicate detection uses the remote API when a user_id is available; if not,
+      duplicate detection will be skipped and all parsed kills will be considered
+      non-duplicates locally (but uploads may still fail if no key).
 
-    Optional progress_callback(index, total, filepath) will be called before
-    parsing each file so callers (e.g. a GUI) can show concise progress.
+    Optional progress_callback(index, total, filepath) is invoked before parsing
+    each file so callers (e.g., a GUI) can show concise progress.
 
-    Returns a tuple: (published_kills_count, duplicates_count)
+    Returns a tuple with four counts:
+      (uploaded_count, duplicates_count, total_kills_found, failed_uploads_count)
     """
     try:
         if not backup_dir or not os.path.isdir(backup_dir):
             if not suppress_file_logs:
                 global_variables.log(f"No backup directory found at: {backup_dir}")
-            return (0, 0)
+            return (0, 0, 0, 0)
 
         files = [f for f in os.listdir(backup_dir) if os.path.isfile(os.path.join(backup_dir, f))]
         files.sort()
@@ -741,7 +746,12 @@ def parse_backup_logs(backup_dir, rsi_name, user_id=None, progress_callback=None
                                                     'killers_ship': global_active_ship,
                                                     'damage_type': parsed.get('damage_type')
                                                 }
-                                                sent = send_kill_to_api(json_data, suppress_logs=suppress_file_logs)
+                                                sent_result = send_kill_to_api(json_data, suppress_logs=suppress_file_logs, return_error=True)
+                                                # Normalize result
+                                                if isinstance(sent_result, tuple) and len(sent_result) == 2:
+                                                    sent, err = sent_result
+                                                else:
+                                                    sent, err = bool(sent_result), None
                                                 if sent:
                                                     uploaded_count += 1
                                                     try:
@@ -750,7 +760,15 @@ def parse_backup_logs(backup_dir, rsi_name, user_id=None, progress_callback=None
                                                         pass
                                                 else:
                                                     # If sending failed, still keep local aggregated record for reporting
-                                                    aggregated_kills.append(parsed)
+                                                    try:
+                                                        failed_rec = dict(parsed)
+                                                    except Exception:
+                                                        failed_rec = {'victim': parsed.get('victim'), 'time': parsed.get('time')}
+                                                    try:
+                                                        failed_rec['_error'] = err
+                                                    except Exception:
+                                                        pass
+                                                    aggregated_kills.append(failed_rec)
                                             except Exception:
                                                 aggregated_kills.append(parsed)
                                 except Exception as e:
@@ -765,53 +783,63 @@ def parse_backup_logs(backup_dir, rsi_name, user_id=None, progress_callback=None
 
     except Exception as e:
         global_variables.log(f"Error in parse_backup_logs: {e}")
-        return (0, 0)
+        return (0, 0, 0, 0)
 
-    # After successfully parsing all files, publish a summary of kills
+    # After successfully parsing all files, compute summary of kills
+    total_kills = 0
+    failed_uploads = 0
     try:
-        # Combine uploaded_kills and aggregated_kills for a full summary
-        all_kills_for_summary = []
-        try:
-            all_kills_for_summary.extend(uploaded_kills)
-        except Exception:
-            pass
-        try:
-            all_kills_for_summary.extend(aggregated_kills)
-        except Exception:
-            pass
+        total_kills = len(uploaded_kills) + len(aggregated_kills)
+        failed_uploads = len(aggregated_kills)
+        if not suppress_file_logs:
+            # Combine uploaded_kills and aggregated_kills for a full summary and log it
+            all_kills_for_summary = []
+            try:
+                all_kills_for_summary.extend(uploaded_kills)
+            except Exception:
+                pass
+            try:
+                all_kills_for_summary.extend(aggregated_kills)
+            except Exception:
+                pass
 
-        if all_kills_for_summary:
-            # aggregate by victim
-            summary = {}
-            for k in all_kills_for_summary:
-                victim = k.get('victim')
-                weapon = k.get('weapon')
-                damage = k.get('damage_type')
-                summary.setdefault(victim, []).append((weapon, damage))
+            if all_kills_for_summary:
+                # aggregate by victim
+                summary = {}
+                for k in all_kills_for_summary:
+                    victim = k.get('victim')
+                    weapon = k.get('weapon')
+                    damage = k.get('damage_type')
+                    summary.setdefault(victim, []).append((weapon, damage))
 
-            global_variables.log("\nBackup parse summary:")
-            total_kills = 0
-            for victim, details in summary.items():
-                total_kills += len(details)
-                # count weapons/damage occurrences
-                counts = {}
-                for w, d in details:
-                    key = f"{w} ({d})"
-                    counts[key] = counts.get(key, 0) + 1
-                weapons_summary = ", ".join([f"{k}: {v}" for k, v in counts.items()])
-                global_variables.log(f"{victim}: {len(details)} kills — {weapons_summary}")
+                global_variables.log("\nBackup parse summary:")
+                for victim, details in summary.items():
+                    # count weapons/damage occurrences
+                    counts = {}
+                    for w, d in details:
+                        key = f"{w} ({d})"
+                        counts[key] = counts.get(key, 0) + 1
+                    weapons_summary = ", ".join([f"{k}: {v}" for k, v in counts.items()])
+                    global_variables.log(f"{victim}: {len(details)} kills — {weapons_summary}")
 
-            global_variables.log(f"Total kills parsed from backups: {total_kills} (uploaded: {uploaded_count}, failed uploads: {len(aggregated_kills)})")
-        else:
-            global_variables.log("No kills found in backup logs.")
+                global_variables.log(f"Total kills parsed from backups: {total_kills} (uploaded: {uploaded_count}, failed uploads: {failed_uploads})")
+            else:
+                global_variables.log("No kills found in backup logs.")
     except Exception as e:
-        global_variables.log(f"Error generating backup summary: {e}")
+        if not suppress_file_logs:
+            global_variables.log(f"Error generating backup summary: {e}")
 
-    # Return summary counts: (published_count, duplicates_count)
+    # Expose failed uploads for UI/logging (always set, independent of suppress_file_logs)
     try:
-        return (uploaded_count, duplicates_count)
+        global_variables.set_last_failed_uploads(aggregated_kills)
     except Exception:
-        return (0, duplicates_count)
+        pass
+
+    # Return summary counts: (published_count, duplicates_count, total_kills_found, failed_uploads_count)
+    try:
+        return (uploaded_count, duplicates_count, total_kills, failed_uploads)
+    except Exception:
+        return (uploaded_count, duplicates_count, 0, 0)
 
 # Trigger kill event
 @global_variables.log_exceptions
@@ -961,20 +989,29 @@ def parse_kill_local(line, target_name, suppress_logs=False):
 
 
 @global_variables.log_exceptions
-def send_kill_to_api(json_data, suppress_logs=False):
-    """Send a kill JSON payload to the API. Returns True on successful POST (200/201)."""
-    # Delegate to the central publishing helper
+def send_kill_to_api(json_data, suppress_logs=False, return_error=False):
+    """Send a kill JSON payload to the API.
+
+    - When return_error=False (default), returns True/False on success/failure.
+    - When return_error=True, returns a tuple (success: bool, error_info: Optional[dict]).
+      error_info contains diagnostic fields like status, message, response, exception.
+    """
     try:
-        return publish_kill(json_data, suppress_logs=suppress_logs)
-    except Exception:
+        return publish_kill(json_data, suppress_logs=suppress_logs, return_error=return_error)
+    except Exception as e:
+        if return_error:
+            return (False, {"status": None, "message": "Exception in send_kill_to_api", "exception": str(e)})
         return False
 
 
 @global_variables.log_exceptions
-def publish_kill(json_data, suppress_logs=False):
+def publish_kill(json_data, suppress_logs=False, return_error=False):
     """Centralized publish function used by live and backup flows.
 
-    Returns True on success (HTTP 200/201) and False otherwise.
+    Returns:
+      - If return_error is False (default): True on success (HTTP 200/201), else False.
+      - If return_error is True: (success: bool, error_info: Optional[dict]).
+        error_info includes keys like: status, message, response, exception.
     """
     try:
         key = global_variables.get_key()
@@ -985,6 +1022,8 @@ def publish_kill(json_data, suppress_logs=False):
     if not api_key.get('value'):
         if not suppress_logs:
             global_variables.log("Kill event will not be sent. Enter valid key to establish connection with Servitor...")
+        if return_error:
+            return (False, {"status": None, "message": "No API key configured"})
         return False
 
     headers = {
@@ -1002,14 +1041,27 @@ def publish_kill(json_data, suppress_logs=False):
         if response.status_code in (200, 201):
             if not suppress_logs:
                 global_variables.log("Kill logged.")
+            if return_error:
+                return (True, None)
             return True
         else:
             if not suppress_logs:
                 global_variables.log("Relaunch BeowulfHunter and reconnect with a new Key.")
+            if return_error:
+                # Include a small snippet of the response text for diagnostics
+                try:
+                    text = response.text
+                    if text and len(text) > 1000:
+                        text = text[:1000] + "..."
+                except Exception:
+                    text = None
+                return (False, {"status": response.status_code, "message": "Non-success status", "response": text})
             return False
     except requests.exceptions.RequestException as e:
         if not suppress_logs:
             global_variables.log(f"Error sending kill event: {e}")
+        if return_error:
+            return (False, {"status": None, "message": "RequestException", "exception": str(e)})
         return False
 
 @global_variables.log_exceptions

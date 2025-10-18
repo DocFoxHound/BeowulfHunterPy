@@ -163,8 +163,12 @@ def initialize_game_gui(app):
     # Only attempt when a valid path is returned to avoid None errors.
     try:
         potential_log = set_sc_log_location()
-        if potential_log:
+        # Always record the attempt (logs whether set or cleared)
+        try:
             global_variables.set_log_file_location(potential_log)
+        except Exception:
+            pass
+        if potential_log:
             try:
                 rh = find_rsi_handle(potential_log)
                 if rh:

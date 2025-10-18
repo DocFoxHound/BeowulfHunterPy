@@ -97,6 +97,7 @@ class GameController:
         if self._services_started:
             return
         try:
+            # Always record the attempt (this logs whether set or cleared)
             global_variables.set_log_file_location(set_sc_log_location())
             log_file_location = global_variables.get_log_file_location()
             if log_file_location:

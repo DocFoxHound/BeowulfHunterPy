@@ -2,8 +2,10 @@ import os
 import threading
 import parser
 import global_variables
-from config import find_rsi_handle
+from config import find_rsi_handle, set_sc_log_location
 import tkinter as _tk
+from tkinter import filedialog as _fd
+import re
 
 
 def create_load_prev_controls(app, text_area, button_style=None, controls_parent=None):
@@ -66,12 +68,73 @@ def create_load_prev_controls(app, text_area, button_style=None, controls_parent
         else:
             load_prev_button.pack(side=_tk.LEFT, padx=(5, 0))
 
+        # Optional: choose folder button + path label so users can point to backups manually
+        chosen_path_var = None
+        chosen_path_label = None
+        try:
+            chosen_path_var = tk.StringVar(value="")
+            # Expose selected override on app so worker can read it
+            if getattr(app, '_backup_dir_override', None):
+                chosen_path_var.set(getattr(app, '_backup_dir_override'))
+
+            def _choose_folder():
+                try:
+                    # Prefer typical install root as a starting dir on Windows
+                    start_dir = None
+                    try:
+                        pf = os.environ.get('ProgramFiles', None)
+                        if pf:
+                            sd = os.path.join(pf, 'Roberts Space Industries', 'StarCitizen')
+                            if os.path.isdir(sd):
+                                start_dir = sd
+                    except Exception:
+                        start_dir = None
+                    path = _fd.askdirectory(title='Select Star Citizen logbackups folder', initialdir=start_dir)
+                except Exception:
+                    path = _fd.askdirectory(title='Select logbackups folder')
+                if path:
+                    try:
+                        setattr(app, '_backup_dir_override', path)
+                    except Exception:
+                        pass
+                    try:
+                        chosen_path_var.set(path)
+                    except Exception:
+                        pass
+            choose_btn = tk.Button(btn_row, text="Choose Folder…", **{**bstyle, 'font': ('Times New Roman', 10)})
+            if stacked_controls:
+                choose_btn.pack(side=_tk.LEFT, padx=(0, 6), pady=(6, 2))
+            else:
+                choose_btn.pack(side=_tk.LEFT, padx=(6, 0))
+            choose_btn.config(command=_choose_folder)
+
+            # Compact path indicator (truncated) so user knows what's selected
+            def _truncate(p, maxlen=48):
+                try:
+                    p = str(p or '').strip()
+                    if len(p) <= maxlen:
+                        return p
+                    # keep start and end segments
+                    head = p[:int(maxlen*0.6)].rstrip(' \\/')
+                    tail = p[-int(maxlen*0.3):]
+                    return f"{head}…{tail}"
+                except Exception:
+                    return p
+            chosen_path_label = tk.Label(btn_row, textvariable=chosen_path_var, justify=_tk.LEFT,
+                                          bg="#1a1a1a", fg="#bcbcd8", font=("Times New Roman", 9))
+            if stacked_controls:
+                chosen_path_label.pack(side=_tk.LEFT, padx=(0, 6), pady=(6, 2))
+            else:
+                chosen_path_label.pack(side=_tk.LEFT, padx=(8, 0))
+        except Exception:
+            pass
+
         # Description label (wraps, subtle color) explaining how to use this function
         try:
             desc_text = (
                 "Scan and import kills from older game log backups.\n"
-                "Use this after activating your API key to pull in any kills recorded in previous sessions.\n"
-                "If available, logs are read from a 'logbackups' folder next to your current Star Citizen log file."
+                "Use this after activating your API key to pull in old kills.\n"
+                "Logs are read from a 'logbackups' folder in the Star Citizen folder."
             )
             if stacked_controls:
                 desc = tk.Label(control_frame, text=desc_text, justify=_tk.LEFT, anchor='w',
@@ -90,29 +153,111 @@ def create_load_prev_controls(app, text_area, button_style=None, controls_parent
         except Exception:
             pass
 
+        def _discover_backup_dir():
+            """Best-effort discovery of the logbackups directory.
+
+            Priority:
+            1) User-selected override (Choose Folder…)
+            2) Sibling 'logbackups' next to detected Game.log (refresh detection if needed)
+            3) SC_LOG_LOCATION env var -> sibling 'logbackups'
+            4) ./logbackups under current working directory
+            """
+            # 1) user override
+            try:
+                override = getattr(app, '_backup_dir_override', None)
+                if override and os.path.isdir(override):
+                    return override
+            except Exception:
+                pass
+
+            # 2) next to detected Game.log
+            try:
+                log_file_location = global_variables.get_log_file_location()
+                # If not set (e.g., app launched before game), try to detect now
+                if not log_file_location:
+                    try:
+                        detected = set_sc_log_location()
+                        if detected:
+                            global_variables.set_log_file_location(detected)
+                            log_file_location = detected
+                    except Exception:
+                        pass
+                if log_file_location and os.path.isfile(log_file_location):
+                    candidate = os.path.join(os.path.dirname(log_file_location), 'logbackups')
+                    if os.path.isdir(candidate):
+                        return candidate
+            except Exception:
+                pass
+
+            # 3) from env var set by config
+            try:
+                env_log = os.environ.get('SC_LOG_LOCATION')
+                if env_log and os.path.isfile(env_log):
+                    candidate = os.path.join(os.path.dirname(env_log), 'logbackups')
+                    if os.path.isdir(candidate):
+                        return candidate
+            except Exception:
+                pass
+
+            # 4) local folder
+            try:
+                candidate = os.path.join(os.path.abspath('.'), 'logbackups')
+                if os.path.isdir(candidate):
+                    return candidate
+            except Exception:
+                pass
+            return None
+
+        def _find_handle_from_backups(backup_dir):
+            """Attempt to discover RSI handle by scanning backup files for Handle[...] patterns."""
+            if not backup_dir or not os.path.isdir(backup_dir):
+                return None
+            try:
+                files = [os.path.join(backup_dir, f) for f in os.listdir(backup_dir) if os.path.isfile(os.path.join(backup_dir, f))]
+                # scan newest-looking first
+                files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                handle_re = re.compile(r"Handle\[([^\]]+)\]")
+                login_kw = "User Login Success"
+                for i, path in enumerate(files[:50]):  # limit scan for speed
+                    try:
+                        with open(path, 'r', encoding='utf-8', errors='ignore') as fh:
+                            for line in fh:
+                                if login_kw in line:
+                                    m = handle_re.search(line)
+                                    if m:
+                                        return m.group(1)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            return None
+
         def _load_backups_worker():
             # discover backup directory
             backup_dir = None
             log_file_location = None
             try:
                 log_file_location = global_variables.get_log_file_location()
-                if log_file_location:
-                    game_dir = os.path.dirname(log_file_location)
-                    candidate = os.path.join(game_dir, 'logbackups')
-                    if os.path.isdir(candidate):
-                        backup_dir = candidate
             except Exception:
-                pass
+                log_file_location = None
 
-            if not backup_dir:
-                candidate = os.path.join(os.path.abspath('.'), 'logbackups')
-                if os.path.isdir(candidate):
-                    backup_dir = candidate
+            backup_dir = _discover_backup_dir()
 
             rsi_handle = global_variables.get_rsi_handle()
             if not rsi_handle and log_file_location:
                 try:
                     rsi_handle = find_rsi_handle(log_file_location)
+                except Exception:
+                    pass
+            if not rsi_handle and backup_dir:
+                # Try to infer from backups
+                try:
+                    rsi_handle = _find_handle_from_backups(backup_dir)
+                    if rsi_handle:
+                        try:
+                            global_variables.set_rsi_handle(rsi_handle)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 
@@ -190,8 +335,16 @@ def create_load_prev_controls(app, text_area, button_style=None, controls_parent
 
             parsed_count = 0
             duplicates_count = 0
+            total_found = 0
+            failed_uploads = 0
             try:
-                parsed_count, duplicates_count = parser.parse_backup_logs(backup_dir, rsi_handle, global_variables.get_user_id(), progress_callback=progress_cb, suppress_file_logs=True)
+                parsed_count, duplicates_count, total_found, failed_uploads = parser.parse_backup_logs(
+                    backup_dir,
+                    rsi_handle,
+                    global_variables.get_user_id(),
+                    progress_callback=progress_cb,
+                    suppress_file_logs=True
+                )
             finally:
                 try:
                     global_variables.suppress_logs = False
@@ -221,11 +374,92 @@ def create_load_prev_controls(app, text_area, button_style=None, controls_parent
                             except Exception:
                                 pass
 
-                    text_area.insert(_tk.END, "Parsing backup logs complete.\n")
+                    # Compose clearer result message
                     try:
-                        global_variables.log(f"Parsing backup logs complete. Parsed: {parsed_count}, Duplicates skipped: {duplicates_count}")
+                        msg = f"Parsing backup logs complete. Uploaded: {parsed_count}, Duplicates skipped: {duplicates_count}"
+                        if total_found:
+                            msg += f", Found: {total_found}"
+                        if failed_uploads:
+                            msg += f", Failed uploads: {failed_uploads}"
+                        # Helpful hints if nothing uploaded or counted
+                        try:
+                            uid = global_variables.get_user_id()
+                            key = global_variables.get_key()
+                        except Exception:
+                            uid = None
+                            key = None
+                        if parsed_count == 0 and duplicates_count == 0:
+                            if not key:
+                                msg += " — No API key configured; uploads are disabled. Enter your key on the Main tab and try again."
+                            elif not uid:
+                                msg += " — No user id detected. Validate your key first so duplicates can be detected."
+                            elif total_found == 0:
+                                msg += " — No kills were found in the backups."
+                        text_area.insert(_tk.END, msg + "\n")
+                        global_variables.log(msg)
+                        # If uploads failed, log a concise list of failed items (capped)
+                        if failed_uploads:
+                            try:
+                                failed = global_variables.get_last_failed_uploads() or []
+                            except Exception:
+                                failed = []
+                            if failed:
+                                max_show = 25
+                                text_area.insert(_tk.END, f"Failed upload details (showing up to {max_show}):\n")
+                                global_variables.log(f"Failed upload details (showing up to {max_show}):")
+                                shown = 0
+                                for item in failed:
+                                    if shown >= max_show:
+                                        break
+                                    try:
+                                        victim = item.get('victim')
+                                        ts = item.get('time')
+                                        zone = item.get('zone')
+                                        weapon = item.get('weapon')
+                                        dt = item.get('damage_type')
+                                        err = item.get('_error') if isinstance(item, dict) else None
+                                        status = None
+                                        err_msg = None
+                                        resp_snip = None
+                                        exc = None
+                                        if isinstance(err, dict):
+                                            status = err.get('status')
+                                            err_msg = err.get('message')
+                                            resp_snip = err.get('response')
+                                            exc = err.get('exception')
+                                        extra = []
+                                        if status is not None:
+                                            extra.append(f"status={status}")
+                                        if err_msg:
+                                            extra.append(f"msg={err_msg}")
+                                        if exc:
+                                            extra.append(f"exc={exc}")
+                                        if resp_snip:
+                                            # keep response snippet compact to avoid flooding UI
+                                            snip = resp_snip.replace('\n', ' ')
+                                            if len(snip) > 200:
+                                                snip = snip[:200] + '...'
+                                            extra.append(f"resp={snip}")
+                                        extra_str = (" | " + "; ".join(extra)) if extra else ""
+                                        line = f" - {ts} | {victim} | zone={zone} | weapon={weapon} | damage={dt}{extra_str}\n"
+                                    except Exception:
+                                        line = f" - {str(item)}\n"
+                                    text_area.insert(_tk.END, line)
+                                    try:
+                                        global_variables.log(line.strip())
+                                    except Exception:
+                                        pass
+                                    shown += 1
+                                if len(failed) > max_show:
+                                    more = len(failed) - max_show
+                                    text_area.insert(_tk.END, f"... and {more} more.\n")
+                                    global_variables.log(f"... and {more} more.")
                     except Exception:
-                        pass
+                        text_area.insert(_tk.END, "Parsing backup logs complete.\n")
+                        try:
+                            global_variables.log(f"Parsing backup logs complete. Uploaded: {parsed_count}, Duplicates skipped: {duplicates_count}")
+                        except Exception:
+                            pass
 
                     try:
                         load_prev_button.config(state=_tk.NORMAL)

@@ -1,6 +1,7 @@
 import tkinter as tk
 import functools
 import traceback
+import os
 
 class EventLogger:
     def __init__(self, text_widget):
@@ -55,6 +56,8 @@ api_kills_ac = []          # subset classified as AC
 api_kills_all = []         # combined list in API-like schema (API + live)
 # General-purpose combined list of all kills, referenced by graphs tab
 all_kills = []
+ # Last failed uploads from backup parsing (list of parsed kill dicts)
+last_failed_uploads = []
 
 def set_rsi_handle(handle):
     global rsi_handle
@@ -87,6 +90,19 @@ def get_rsi_handle():
 def set_log_file_location(location):
     global log_file_location
     log_file_location = location
+    try:
+        # Log both the file path and its parent folder (if any)
+        folder = os.path.dirname(location) if location else None
+        # Use local module log() so it routes to GUI logger if available
+        if location:
+            log(f"Log file location set to: {location}")
+        else:
+            log("Log file location cleared or not found")
+        if folder:
+            log(f"Log folder: {folder}")
+    except Exception:
+        # Never allow logging to break state assignment
+        pass
 
 def get_log_file_location():
     return log_file_location
@@ -223,6 +239,21 @@ def set_all_kills(items):
 def get_all_kills():
     """Return the general-purpose all_kills list (alias of api_kills_all)."""
     return all_kills
+
+
+# --- failed uploads from backup parsing ---
+def set_last_failed_uploads(items):
+    """Store the most recent list of failed upload records from backup parsing."""
+    global last_failed_uploads
+    try:
+        last_failed_uploads = list(items) if items is not None else []
+    except Exception:
+        last_failed_uploads = []
+
+
+def get_last_failed_uploads():
+    """Return the last failed upload records from backup parsing (list of dicts)."""
+    return last_failed_uploads
 
 
 def log(message):
