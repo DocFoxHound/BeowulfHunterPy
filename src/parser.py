@@ -9,6 +9,14 @@ from datetime import datetime, timezone, timedelta
 
 local_version = "7.0"
 api_key = {"value": None}
+# Star Citizen public API key for org/profile lookups (provided by user)
+ORG_API_KEY = ""
+# Simple in-memory cache: handle(lower) -> { 'org_sid': str|None, 'org_picture': str|None, 'victim_image': str|None }
+org_info_cache = {}
+# Optional small on-disk cache to reduce repeated API calls across runs
+ORG_CACHE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'org_cache.json')
+_org_cache_loaded = False
+_org_disk_cache = {}
 # Cache of kills fetched from the API for the current run. Stored as set of
 # (victim, timestamp) tuples for fast duplicate checks by other functions.
 api_kills_cache = set()
@@ -21,6 +29,196 @@ last_vehicle_context = {
     'time': None,          # timestamp string from the log line
     'killer': None         # name of the player who caused the destruction
 }
+
+
+@global_variables.log_exceptions
+def get_org_info_for_handle(handle):
+    """Return org info dict for a given RSI handle.
+
+    Returns a dict: { 'org_sid': Optional[str], 'org_picture': Optional[str], 'victim_image': Optional[str] }.
+    Uses a small in-memory cache to avoid repeated network requests.
+    """
+    try:
+        if not handle:
+            return {"org_sid": None, "org_picture": None, "victim_image": None}
+        h = str(handle).strip()
+        if not h:
+            return {"org_sid": None, "org_picture": None, "victim_image": None}
+        key = h.lower()
+        # Load disk cache once per run
+        global _org_cache_loaded, _org_disk_cache
+        try:
+            if not _org_cache_loaded and os.path.isfile(ORG_CACHE_PATH):
+                try:
+                    with open(ORG_CACHE_PATH, 'r', encoding='utf-8', errors='ignore') as fh:
+                        _org_disk_cache = json.load(fh) or {}
+                except Exception:
+                    _org_disk_cache = {}
+                _org_cache_loaded = True
+        except Exception:
+            pass
+
+        # Cached?
+        try:
+            if key in org_info_cache:
+                return org_info_cache[key]
+            # Check disk cache as a fallback
+            if key in _org_disk_cache:
+                try:
+                    cached = _org_disk_cache.get(key) or {}
+                    # normalize keys
+                    res = {
+                        'org_sid': cached.get('org_sid'),
+                        'org_picture': cached.get('org_picture'),
+                        'victim_image': cached.get('victim_image')
+                    }
+                    org_info_cache[key] = res
+                    return res
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Ensure API key is loaded from cfg if not set
+        def _get_org_api_key():
+            global ORG_API_KEY
+            try:
+                if ORG_API_KEY:
+                    return ORG_API_KEY
+                # cfg is at project root: one directory up from this file
+                root = os.path.dirname(os.path.dirname(__file__))
+                cfg_path = os.path.join(root, 'killtracker_key.cfg')
+                key_val = None
+                try:
+                    with open(cfg_path, 'r', encoding='utf-8', errors='ignore') as fh:
+                        lines = fh.readlines()
+                        if len(lines) >= 2:
+                            key_val = lines[1].strip()
+                except Exception:
+                    key_val = None
+                if key_val:
+                    ORG_API_KEY = key_val
+                    return ORG_API_KEY
+            except Exception:
+                pass
+            return ORG_API_KEY
+
+        api_key_val = _get_org_api_key()
+        if not api_key_val:
+            # Can't query without API key; return best-effort from disk cache if present
+            try:
+                if key in _org_disk_cache:
+                    cached = _org_disk_cache.get(key) or {}
+                    return {
+                        'org_sid': cached.get('org_sid'),
+                        'org_picture': cached.get('org_picture'),
+                        'victim_image': cached.get('victim_image')
+                    }
+            except Exception:
+                pass
+            return {"org_sid": None, "org_picture": None, "victim_image": None}
+
+        # Build request
+        url = f"https://api.starcitizen-api.com/{api_key_val}/v1/cache/user/{h}"
+        sid = None
+        image = None  # organization image
+        profile_image = None  # player's profile avatar
+        # Light retry for transient errors during bulk parsing
+        attempts = 2
+        live_attempted = False
+        for attempt in range(attempts):
+            resp = None
+            try:
+                resp = requests.get(url, timeout=10)
+            except Exception:
+                resp = None
+            if resp is not None and resp.status_code == 200:
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = None
+                # If cache method returns a hint to use live, try live once
+                try:
+                    needs_live = False
+                    if isinstance(data, dict):
+                        if (data.get('success') in (0, '0', False)) or (data.get('data') is None):
+                            msg = str(data.get('message') or '').lower()
+                            if ('live' in msg) or ('data was null' in msg) or ('use the `live` method' in msg):
+                                needs_live = True
+                    if needs_live and not live_attempted:
+                        live_attempted = True
+                        live_url = url.replace('/cache/', '/live/')
+                        try:
+                            live_resp = requests.get(live_url, timeout=10)
+                            if live_resp.status_code == 200:
+                                try:
+                                    data = live_resp.json()
+                                except Exception:
+                                    data = None
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                # Prefer primary organization info; fallback to first affiliation
+                org = None
+                try:
+                    if isinstance(data, dict):
+                        d = data.get('data') or {}
+                        if isinstance(d, dict):
+                            org = d.get('organization')
+                            if not org:
+                                aff = d.get('affiliation')
+                                if isinstance(aff, list) and aff:
+                                    org = aff[0]
+                            # Extract player's profile image if present
+                            try:
+                                prof = d.get('profile')
+                                if isinstance(prof, dict):
+                                    profile_image = prof.get('image')
+                            except Exception:
+                                profile_image = None
+                except Exception:
+                    org = None
+                if isinstance(org, dict):
+                    try:
+                        sid = org.get('sid')
+                    except Exception:
+                        sid = None
+                    try:
+                        image = org.get('image')
+                    except Exception:
+                        image = None
+                break
+            else:
+                if resp is not None and resp.status_code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
+                    try:
+                        time.sleep(0.5)
+                    except Exception:
+                        pass
+                    continue
+                else:
+                    break
+        # Network or parse failure; just leave None values
+        sid = sid or None
+        image = image or None
+        profile_image = profile_image or None
+
+        result = {"org_sid": sid, "org_picture": image, "victim_image": profile_image}
+        try:
+            org_info_cache[key] = result
+        except Exception:
+            pass
+        # Persist to disk cache if we have useful data
+        try:
+            if any(result.get(k) for k in ('org_sid', 'org_picture', 'victim_image')):
+                _org_disk_cache[key] = result
+                with open(ORG_CACHE_PATH, 'w', encoding='utf-8') as fh:
+                    json.dump(_org_disk_cache, fh, ensure_ascii=False)
+        except Exception:
+            pass
+        return result
+    except Exception:
+        return {"org_sid": None, "org_picture": None, "victim_image": None}
 
 
 @global_variables.log_exceptions
@@ -310,6 +508,9 @@ def fetch_and_classify_api_kills_for_ui(user_id=None):
         # ship_killed indicates FPS vs ship kill per API; keep raw value
         ship_killed = item.get('ship_killed') or item.get('shipKilled') or item.get('ship-killed')
         damage_type = item.get('damage_type') or item.get('damageType')
+        org_sid = item.get('org_sid') or item.get('orgSid') or item.get('organization_sid')
+        org_picture = item.get('org_picture') or item.get('orgImage') or item.get('organization_image')
+        victim_image = item.get('victim_image') or item.get('victimImage') or item.get('profile_image') or item.get('profileImage')
         # API-like fields commonly present; include with safe fallbacks
         id_val = item.get('id') or item.get('_id') or None
         user_id_val = item.get('user_id') or item.get('userId') or None
@@ -328,6 +529,9 @@ def fetch_and_classify_api_kills_for_ui(user_id=None):
             'killers_ship': str(killers_ship).strip() if killers_ship else None,
             'damage_type': str(damage_type).strip() if damage_type else None,
             'ship_killed': str(ship_killed).strip() if ship_killed is not None else None,
+            'org_sid': str(org_sid).strip() if org_sid else None,
+            'org_picture': str(org_picture).strip() if org_picture else None,
+            'victim_image': str(victim_image).strip() if victim_image else None,
             'source': 'api'
         }
         # Skip entries with neither victim nor time; insufficient for display
@@ -336,6 +540,9 @@ def fetch_and_classify_api_kills_for_ui(user_id=None):
         normalized.append(rec)
 
         # Build API-like record for combined list
+        # Map to API-like schema used by UI combined list, and include location/coordinates if present
+        loc_val = item.get('location') or item.get('zone') or item.get('map')
+        coords_val = item.get('coordinates') or item.get('coords')
         api_item = {
             'id': str(id_val) if id_val is not None else None,
             'user_id': str(user_id_val) if user_id_val is not None else None,
@@ -347,6 +554,12 @@ def fetch_and_classify_api_kills_for_ui(user_id=None):
             'patch': str(patch) if patch is not None else None,
             'game_mode': str(game_mode_val).strip() if game_mode_val else None,
             'timestamp': str(time_val).strip() if time_val else None,
+            # Optional extras consumed by Details view
+            'location': str(loc_val).strip() if loc_val else None,
+            'coordinates': str(coords_val).strip() if coords_val else None,
+            'org_sid': str(org_sid).strip() if org_sid else None,
+            'org_picture': str(org_picture).strip() if org_picture else None,
+            'victim_image': str(victim_image).strip() if victim_image else None,
         }
         api_like_items.append(api_item)
 
@@ -732,19 +945,24 @@ def parse_backup_logs(backup_dir, rsi_name, user_id=None, progress_callback=None
                                             # non-duplicate: attempt to publish like parse_kill_line would
                                             try:
                                                 # send_kill_to_api expects the JSON-shaped data similar to parse_kill_line
+                                                victim_handle = parsed.get('victim')
+                                                v_org = get_org_info_for_handle(victim_handle)
                                                 json_data = {
                                                     'player': rsi_name,
                                                     'victim': parsed.get('victim'),
                                                     'time': parsed.get('time'),
                                                     'zone': parsed.get('zone'),
-                                                        'location': last_vehicle_context.get('zone'),
-                                                        'coordinates': last_vehicle_context.get('coordinates'),
+                                                    'location': last_vehicle_context.get('zone'),
+                                                    'coordinates': last_vehicle_context.get('coordinates'),
                                                     'weapon': parsed.get('weapon'),
                                                     'rsi_profile': f"https://robertsspaceindustries.com/citizens/{parsed.get('victim')}",
                                                     'game_mode': global_game_mode,
                                                     'client_ver': local_version,
                                                     'killers_ship': global_active_ship,
-                                                    'damage_type': parsed.get('damage_type')
+                                                    'damage_type': parsed.get('damage_type'),
+                                                    'org_sid': v_org.get('org_sid'),
+                                                    'org_picture': v_org.get('org_picture'),
+                                                    'victim_image': v_org.get('victim_image'),
                                                 }
                                                 sent_result = send_kill_to_api(json_data, suppress_logs=suppress_file_logs, return_error=True)
                                                 # Normalize result
@@ -872,6 +1090,8 @@ def parse_kill_line(line, target_name):
 
     event_message = f"You have killed {killed},"
     global_variables.log(event_message)
+    # Fetch org info for the victim
+    org_info = get_org_info_for_handle(killed)
     json_data = {
         'player': target_name,
         'victim': killed,
@@ -884,31 +1104,14 @@ def parse_kill_line(line, target_name):
         'game_mode': global_game_mode,
         'client_ver': "7.0",
         'killers_ship': global_active_ship,
-        'damage_type': damage_type
+        'damage_type': damage_type,
+        'org_sid': org_info.get('org_sid'),
+        'org_picture': org_info.get('org_picture'),
+        'victim_image': org_info.get('victim_image')
     }
 
-    # After recording to combined list, refresh UI lists from all_kills to avoid duplicates
-    try:
-        app = global_variables.get_app()
-        refs = global_variables.get_main_tab_refs()
-        refresh = refs.get('refresh_kill_columns')
-        if app is not None and callable(refresh):
-            try:
-                app.after(0, refresh)
-            except Exception:
-                refresh()
-        elif callable(refresh):
-            refresh()
-    except Exception:
-        pass
-
-    # Publish to API (network)
-    try:
-        publish_kill(json_data, suppress_logs=False)
-    except Exception as e:
-        global_variables.log(f"Error sending kill event: {e}")
-
-    # Append to combined in-memory list (API-like schema)
+    # First, append to the combined in-memory list (API-like schema)
+    # so the UI refresh includes this live kill immediately.
     try:
         existing = []
         try:
@@ -932,11 +1135,40 @@ def parse_kill_line(line, target_name):
             'patch': None,
             'game_mode': global_game_mode,
             'timestamp': kill_time,
+            # Optional extras consumed by Details view
+            'location': last_vehicle_context.get('zone'),
+            'coordinates': last_vehicle_context.get('coordinates'),
+            'org_sid': org_info.get('org_sid'),
+            'org_picture': org_info.get('org_picture'),
+            'victim_image': org_info.get('victim_image'),
         }
         existing.append(api_like)
         global_variables.set_api_kills_all(existing)
     except Exception:
         pass
+
+    # After recording to combined list, refresh UI lists from all_kills to avoid duplicates
+    try:
+        app = global_variables.get_app()
+        refs = global_variables.get_main_tab_refs()
+        refresh = refs.get('refresh_kill_columns')
+        if app is not None and callable(refresh):
+            try:
+                app.after(0, refresh)
+            except Exception:
+                refresh()
+        elif callable(refresh):
+            refresh()
+    except Exception:
+        pass
+
+    # Publish to API (network)
+    try:
+        publish_kill(json_data, suppress_logs=False)
+    except Exception as e:
+        global_variables.log(f"Error sending kill event: {e}")
+
+    # (Already appended above)
 
 
 @global_variables.log_exceptions
@@ -961,6 +1193,7 @@ def parse_kill_local(line, target_name, suppress_logs=False):
             global_variables.log(event_message)
 
         # Also present a compact JSON-like summary for debugging/inspection
+        org_info = get_org_info_for_handle(killed)
         json_data = {
             'player': target_name,
             'victim': killed,
@@ -974,7 +1207,10 @@ def parse_kill_local(line, target_name, suppress_logs=False):
             'client_ver': "7.0",
             'killers_ship': global_active_ship,
             'damage_type': damage_type,
-            'source': 'backup'
+            'source': 'backup',
+            'org_sid': org_info.get('org_sid'),
+            'org_picture': org_info.get('org_picture'),
+            'victim_image': org_info.get('victim_image'),
         }
         try:
             if not suppress_logs:

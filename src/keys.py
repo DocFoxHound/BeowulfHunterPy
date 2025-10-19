@@ -5,6 +5,7 @@ import global_variables
 
 local_version = "7.0"
 api_key = {"value": None}
+org_api_key = {"value": None}
 
 
 @global_variables.log_exceptions
@@ -94,15 +95,26 @@ def validate_api_key(api_key, rsi_handle):
         return False
 
 @global_variables.log_exceptions
-def save_api_key(key):
+def save_api_key(key, org_key: str | None = None):
+    """Save the player key on the first line and the org key on the second line.
+
+    If org_key is None, we still write a trailing newline to keep two-line format.
+    """
     try:
-        with open("killtracker_key.cfg", "w") as f:
-            f.write(key)
-        api_key["value"] = key  # Make sure to save the key in the global api_key dictionary as well
-        global_variables.set_key(key)  # Update the global variable
-        global_variables.log(f"Personal key validated and saved successfully!: {key}")
+        line1 = (key or "").strip()
+        line2 = (org_key or "").strip()
+        with open("killtracker_key.cfg", "w", encoding="utf-8") as f:
+            f.write(line1 + "\n" + line2)
+        api_key["value"] = line1
+        org_api_key["value"] = line2 if line2 else None
+        global_variables.set_key(line1)
+        try:
+            global_variables.set_org_key(line2 if line2 else None)
+        except Exception:
+            pass
+        global_variables.log("Keys validated and saved successfully (player/org).")
     except Exception as e:
-        global_variables.log(f"Error saving API key: {e}")
+        global_variables.log(f"Error saving API keys: {e}")
 
 # Activate the API key by sending it to the server
 @global_variables.log_exceptions
@@ -131,16 +143,66 @@ def activate_key(key_entry):
 # Load Existing Key (UI-agnostic)
 @global_variables.log_exceptions
 def load_existing_key():
+    """Load player and org keys from cfg; return player key for backward compatibility.
+
+    Side effects: sets global_variables.set_key and set_org_key when available.
+    """
     try:
-        with open("killtracker_key.cfg", "r") as f:
-            entered_key = f.readline().strip()
-            if entered_key:
-                api_key["value"] = entered_key  # Assign the loaded key
-                global_variables.set_key(entered_key)  # Update the global variable
-                return entered_key
-            else:
-                global_variables.log("No valid key found. Please enter a key.")
-                return None
+        with open("killtracker_key.cfg", "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        player = (lines[0].strip() if len(lines) >= 1 else "") or None
+        org = (lines[1].strip() if len(lines) >= 2 else "") or None
+        api_key["value"] = player
+        org_api_key["value"] = org
+        if player:
+            global_variables.set_key(player)
+        try:
+            global_variables.set_org_key(org)
+        except Exception:
+            pass
+        return player
     except FileNotFoundError:
-        global_variables.log("No existing key found. Please enter a valid key.")
+        global_variables.log("No existing key found. Please enter valid keys.")
         return None
+
+def get_org_key_value() -> str | None:
+    return org_api_key.get("value")
+
+
+@global_variables.log_exceptions
+def validate_org_key(org_key: str) -> bool:
+    """Validate the ORG key by calling the Star Citizen API versions endpoint.
+
+    Endpoint: https://api.starcitizen-api.com/{org_key}/v1/cache/versions
+
+    Returns True when the response is HTTP 200 and JSON indicates success (success == 1).
+    Any non-200 status or JSON with success != 1 is treated as invalid.
+    """
+    if not org_key:
+        return False
+    url = f"https://api.starcitizen-api.com/{org_key}/v1/cache/versions"
+    try:
+        resp = requests.get(url, timeout=5)
+        if resp.status_code != 200:
+            try:
+                global_variables.log(f"ORG key validation HTTP error: {resp.status_code}")
+            except Exception:
+                pass
+            return False
+        try:
+            payload = resp.json()
+        except Exception:
+            # If not JSON, treat as failure
+            return False
+        # Typical error looks like: {"data": null, "message": "Malformed request.", "source": null, "success": 0}
+        if isinstance(payload, dict):
+            success = payload.get("success", None)
+            if success is None:
+                # Some responses may omit success but include data; consider non-empty data as success
+                data = payload.get("data")
+                return data is not None
+            return success == 1
+        return False
+    except requests.RequestException as e:
+        global_variables.log(f"ORG Key validation error: {e}")
+        return False

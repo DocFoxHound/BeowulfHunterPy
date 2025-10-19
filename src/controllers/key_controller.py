@@ -4,7 +4,7 @@ from typing import Optional
 import backup_loader
 import global_variables
 from config import get_player_name, set_sc_log_location, find_rsi_handle
-from keys import validate_api_key, save_api_key, load_existing_key
+from keys import validate_api_key, save_api_key, load_existing_key, get_org_key_value, validate_org_key
 from theme import BUTTON_STYLE as THEME_BUTTON_STYLE
 
 
@@ -18,6 +18,27 @@ class KeyController:
         self._key_blink_job = None
         self._key_blink_state = False
         self._key_good = False
+        # Try to fetch org key entry from main tab refs (optional)
+        try:
+            refs = getattr(self.app, 'main_tab_refs', {})
+            self.org_key_entry: Optional[tk.Entry] = refs.get('org_key_entry')
+        except Exception:
+            self.org_key_entry = None
+        # Activate button reference to enable/disable
+        try:
+            self.activate_button: Optional[tk.Button] = refs.get('activate_button')
+        except Exception:
+            self.activate_button = None
+        # Bind entry changes to gating logic
+        try:
+            self.key_entry.bind('<KeyRelease>', lambda e: self._gate_activate_button())
+        except Exception:
+            pass
+        try:
+            if self.org_key_entry is not None:
+                self.org_key_entry.bind('<KeyRelease>', lambda e: self._gate_activate_button())
+        except Exception:
+            pass
 
     def _set_tabs_enabled(self, enabled: bool):
         """Enable or disable non-essential tabs (currently Piracy).
@@ -83,10 +104,63 @@ class KeyController:
         self._set_tabs_enabled(False)
         current_handle = global_variables.get_rsi_handle()
         saved_key = load_existing_key()
-        if saved_key:
+        # Prefill UI entries if values exist
+        try:
+            if saved_key:
+                self.key_entry.delete(0, tk.END)
+                self.key_entry.insert(0, saved_key)
+        except Exception:
+            pass
+        try:
+            okv = get_org_key_value()
+            if okv and self.org_key_entry is not None:
+                self.org_key_entry.delete(0, tk.END)
+                self.org_key_entry.insert(0, okv)
+        except Exception:
+            pass
+        self._gate_activate_button()
+        if saved_key and (get_org_key_value() is not None and get_org_key_value() != ""):
             self.log("Validating saved key")
+            # Validate org key first
+            try:
+                okv = get_org_key_value()
+            except Exception:
+                okv = None
+            if not validate_org_key(okv or ""):
+                self.log("ORG key did not validate. Please enter a valid ORG key.")
+                # Show red error on main tab
+                try:
+                    refs = getattr(self.app, 'main_tab_refs', {})
+                    lbl = refs.get('org_error_label')
+                    btn_row = refs.get('button_row')
+                    if isinstance(lbl, tk.Label) and btn_row is not None:
+                        lbl.config(text="ORG key did not validate. Please enter a valid ORG key.")
+                        # Place inside button_row, below the Activate button
+                        lbl.pack_forget()
+                        lbl.pack(side=tk.TOP, anchor='w', padx=6, pady=(6, 0))
+                except Exception:
+                    pass
+                self._update_key_indicator(False)
+                # Keep tabs disabled and columns hidden
+                try:
+                    refs = getattr(self.app, 'main_tab_refs', {})
+                    hide_cols = refs.get('hide_kill_columns')
+                    if callable(hide_cols):
+                        hide_cols()
+                except Exception:
+                    pass
+                self._set_tabs_enabled(False)
+                return
             if validate_api_key(saved_key, current_handle):
                 self.log("Key is Valid")
+                # Hide org error if previously shown
+                try:
+                    refs = getattr(self.app, 'main_tab_refs', {})
+                    lbl = refs.get('org_error_label')
+                    if isinstance(lbl, tk.Label):
+                        lbl.pack_forget()
+                except Exception:
+                    pass
                 try:
                     self.key_section.pack_forget()
                 except Exception:
@@ -119,7 +193,7 @@ class KeyController:
                 self.log("KEY IS INVALID. Please re-enter a valid key from the Discord bot using /key-create.")
                 self._update_key_indicator(False)
         else:
-            self.log("No key found. Please enter a key.")
+            self.log("Keys missing. Please enter both player and org keys.")
             self._update_key_indicator(False)
             # Ensure tabs remain disabled when no key exists
             self._set_tabs_enabled(False)
@@ -130,8 +204,14 @@ class KeyController:
         except Exception:
             pass
         entered_key = self.key_entry.get().strip()
-        if not entered_key:
-            self.log("No key entered. Please input a valid key.")
+        entered_org_key = ""
+        try:
+            if self.org_key_entry is not None:
+                entered_org_key = self.org_key_entry.get().strip()
+        except Exception:
+            entered_org_key = ""
+        if not entered_key or not entered_org_key:
+            self.log("Both player and org keys are required. Please enter both.")
             self._update_key_indicator(False)
             # Keep columns hidden while waiting for a valid key
             try:
@@ -175,10 +255,50 @@ class KeyController:
         if not current_player:
             self.log("RSI Handle not detected yet. Key validation can proceed; start the game to enable kill tracking.")
 
+        # Validate org key first; do not proceed if invalid
+        if not validate_org_key(entered_org_key):
+            self.log("ORG key did not validate. Please enter a valid ORG key.")
+            # Show red error under ORG field
+            try:
+                refs = getattr(self.app, 'main_tab_refs', {})
+                lbl = refs.get('org_error_label')
+                btn_row = refs.get('button_row')
+                if isinstance(lbl, tk.Label) and btn_row is not None:
+                    lbl.config(text="ORG key did not validate. Please enter a valid ORG key.")
+                    # Place inside button_row, below the Activate button
+                    lbl.pack_forget()
+                    lbl.pack(side=tk.TOP, anchor='w', padx=6, pady=(6, 0))
+            except Exception:
+                pass
+            self._update_key_indicator(False)
+            # Keep columns hidden and tabs disabled
+            try:
+                refs = getattr(self.app, 'main_tab_refs', {})
+                hide_cols = refs.get('hide_kill_columns')
+                if callable(hide_cols):
+                    hide_cols()
+            except Exception:
+                pass
+            self._set_tabs_enabled(False)
+            return
+
         if validate_api_key(entered_key, current_handle):
-            save_api_key(entered_key)
+            # Save both keys (player line1, org line2)
+            save_api_key(entered_key, entered_org_key)
             global_variables.set_key(entered_key)
+            try:
+                global_variables.set_org_key(entered_org_key)
+            except Exception:
+                pass
             self.log("Key activated and saved. Servitor connection established.")
+            # Hide org error if previously shown
+            try:
+                refs = getattr(self.app, 'main_tab_refs', {})
+                lbl = refs.get('org_error_label')
+                if isinstance(lbl, tk.Label):
+                    lbl.pack_forget()
+            except Exception:
+                pass
             try:
                 self.key_section.pack_forget()
             except Exception:
@@ -206,7 +326,7 @@ class KeyController:
                 self.log(f"Error creating backup controls: {e}")
             self._update_key_indicator(True)
         else:
-            self.log("Invalid key. Please enter a valid API key.")
+            self.log("Invalid player key. Please enter a valid API key.")
             self._update_key_indicator(False)
             # Keep columns hidden on invalid key
             try:
@@ -384,5 +504,30 @@ class KeyController:
             refresh = refs.get('refresh_kill_columns')
             if callable(refresh):
                 refresh()
+        except Exception:
+            pass
+
+    def _gate_activate_button(self):
+        """Enable the Activate button only when both keys are present (non-empty)."""
+        try:
+            btn = self.activate_button
+            if btn is None:
+                # Try to resolve lazily
+                refs = getattr(self.app, 'main_tab_refs', {})
+                btn = refs.get('activate_button')
+        except Exception:
+            btn = None
+        if btn is None:
+            return
+        try:
+            pk = (self.key_entry.get().strip() if self.key_entry else "")
+        except Exception:
+            pk = ""
+        try:
+            ok = (self.org_key_entry.get().strip() if self.org_key_entry else "")
+        except Exception:
+            ok = ""
+        try:
+            btn.config(state=('normal' if pk and ok else 'disabled'))
         except Exception:
             pass

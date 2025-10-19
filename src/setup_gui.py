@@ -197,17 +197,21 @@ def initialize_game_gui(app):
     _main_refs = getattr(app, 'main_tab_refs', {})
     key_section = _main_refs.get('key_section')
     key_entry = _main_refs.get('key_entry')
+    org_key_entry = _main_refs.get('org_key_entry')
     # Status label removed; rely on banner key indicator instead
 
     # Ensure a logger/text_area exists; if setup_gui already created it, reuse it.
-    existing_logger = global_variables.get_logger()
-    if existing_logger is None and text_area is not None:
-        global_variables.set_logger(text_area)
-    elif existing_logger is not None:
-        text_area = existing_logger.text_widget
+    try:
+        existing_logger = global_variables.get_logger()
+    except Exception:
+        existing_logger = None
 
     # Controller for key activation/validation and backup controls
-    key_controller = KeyController(app, key_section, key_entry, text_area)
+    try:
+        log_widget = getattr(existing_logger, 'text_widget', None) if existing_logger else None
+    except Exception:
+        log_widget = None
+    key_controller = KeyController(app, key_section, key_entry, log_widget)
 
     # Automatically validate the saved key
     key_controller.validate_saved_key()
@@ -219,6 +223,11 @@ def initialize_game_gui(app):
     try:
         activate_button = _main_refs.get('activate_button')
         if activate_button is not None:
+            # Disable until both keys are present
+            try:
+                activate_button.configure(state='disabled')
+            except Exception:
+                pass
             activate_button.configure(command=key_controller.activate_key)
     except Exception:
         pass

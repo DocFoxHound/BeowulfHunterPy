@@ -45,6 +45,7 @@ tk_app = None
 main_tab_refs = {}
 # When True, `log()` will suppress writing messages (useful during bulk ops)
 suppress_logs = False
+org_key = None
 
 # Current game patch version (e.g., "4.3") discovered from remote API
 patch_version = None
@@ -79,6 +80,13 @@ def set_key(text):
 
 def get_key():
     return key
+
+def set_org_key(text):
+    global org_key
+    org_key = text
+
+def get_org_key():
+    return org_key
 
 def set_rsi_handle(handle):
     global rsi_handle

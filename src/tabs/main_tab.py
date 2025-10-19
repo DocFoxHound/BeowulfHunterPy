@@ -1,8 +1,11 @@
 import os
+import io
+import threading
 from datetime import datetime, timezone, timedelta
 import tkinter as tk
 from typing import Dict, Any, Optional, Callable
 from PIL import Image, ImageTk
+import requests
 import global_variables
 from tabs.details_window import open_details_window
 
@@ -47,6 +50,8 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
         gladius_path = os.path.join(project_root, 'gladius.png')
         icon_rifle = None
         icon_ship = None
+        placeholder_avatar = None
+        placeholder_org = None
         if os.path.isfile(rifle_path):
             try:
                 _rifle_img = Image.open(rifle_path).resize((20, 20), Image.Resampling.LANCZOS)
@@ -59,6 +64,18 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
                 icon_ship = ImageTk.PhotoImage(_ship_img)
             except Exception:
                 icon_ship = None
+        # Simple gray placeholder for victim avatars (50x50)
+        try:
+            _ph = Image.new('RGBA', (50, 50), (40, 40, 40, 255))
+            placeholder_avatar = ImageTk.PhotoImage(_ph)
+        except Exception:
+            placeholder_avatar = None
+        # Small gray placeholder for org avatars (25x25)
+        try:
+            _phs = Image.new('RGBA', (25, 25), (40, 40, 40, 255))
+            placeholder_org = ImageTk.PhotoImage(_phs)
+        except Exception:
+            placeholder_org = None
         if icon_rifle is not None:
             widgets['icon_rifle'] = icon_rifle
             try:
@@ -71,8 +88,179 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
                 setattr(app, 'icon_ship', icon_ship)
             except Exception:
                 pass
+        if placeholder_avatar is not None:
+            widgets['placeholder_avatar'] = placeholder_avatar
+            try:
+                setattr(app, 'placeholder_avatar', placeholder_avatar)
+            except Exception:
+                pass
+        if placeholder_org is not None:
+            widgets['placeholder_org'] = placeholder_org
+            try:
+                setattr(app, 'placeholder_org', placeholder_org)
+            except Exception:
+                pass
     except Exception:
         pass
+
+    # In-memory cache for org avatar images (url -> ImageTk.PhotoImage)
+    try:
+        if not hasattr(app, 'org_avatar_cache') or not isinstance(getattr(app, 'org_avatar_cache'), dict):
+            setattr(app, 'org_avatar_cache', {})
+    except Exception:
+        pass
+
+    avatar_cache: Dict[str, Any] = getattr(app, 'org_avatar_cache', {})
+
+    # Simple tooltip helper for widgets
+    class _ToolTip:
+        def __init__(self, widget: tk.Widget, text: str = ""):
+            self.widget = widget
+            self.text = text
+            self.tip: Optional[tk.Toplevel] = None
+            try:
+                widget.bind("<Enter>", self._enter)
+                widget.bind("<Leave>", self._leave)
+                widget.bind("<Motion>", self._motion)
+            except Exception:
+                pass
+
+        def _enter(self, _evt=None):
+            self._show()
+
+        def _leave(self, _evt=None):
+            self._hide()
+
+        def _motion(self, evt):
+            try:
+                if self.tip is not None:
+                    # Offset a bit from the cursor
+                    x = evt.x_root + 12
+                    y = evt.y_root + 12
+                    self.tip.wm_geometry(f"+{x}+{y}")
+            except Exception:
+                pass
+
+        def _show(self):
+            if not self.text:
+                return
+            try:
+                if self.tip is not None:
+                    return
+                tip = tk.Toplevel(self.widget)
+                tip.wm_overrideredirect(True)
+                tip.attributes('-topmost', True)
+                lbl = tk.Label(
+                    tip,
+                    text=str(self.text),
+                    bg="#2a2a2a",
+                    fg="#ffffff",
+                    relief="solid",
+                    borderwidth=1,
+                    font=("Times New Roman", 10)
+                )
+                lbl.pack(ipadx=6, ipady=3)
+                # Place near the widget
+                try:
+                    x = self.widget.winfo_rootx() + 10
+                    y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+                    tip.wm_geometry(f"+{x}+{y}")
+                except Exception:
+                    pass
+                self.tip = tip
+            except Exception:
+                self.tip = None
+
+        def _hide(self):
+            try:
+                if self.tip is not None:
+                    self.tip.destroy()
+                    self.tip = None
+            except Exception:
+                self.tip = None
+
+    def _make_square_thumbnail(img: Image.Image, size: int = 50) -> Image.Image:
+        try:
+            w, h = img.size
+            # center-crop to square
+            if w != h:
+                side = min(w, h)
+                left = (w - side) // 2
+                top = (h - side) // 2
+                img = img.crop((left, top, left + side, top + side))
+            return img.resize((size, size), Image.Resampling.LANCZOS)
+        except Exception:
+            try:
+                return img.resize((size, size), Image.Resampling.LANCZOS)
+            except Exception:
+                return img
+
+    # Async loader that updates a label with the avatar when ready (parametrized size)
+    def _load_avatar_async_sized(label: tk.Label, url: Optional[str], size: int = 50):
+        if not url:
+            return
+        try:
+            cache_key = f"{url}#s{int(size)}"
+            cached = avatar_cache.get(cache_key)
+            if isinstance(cached, ImageTk.PhotoImage):
+                try:
+                    label.configure(image=cached)
+                    label.image = cached
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
+
+        def worker():
+            content = None
+            try:
+                resp = requests.get(url, timeout=10)
+                if resp.status_code == 200:
+                    content = resp.content
+            except Exception:
+                content = None
+
+            def on_main():
+                try:
+                    if content:
+                        try:
+                            pil = Image.open(io.BytesIO(content)).convert('RGBA')
+                            pil = _make_square_thumbnail(pil, size)
+                            photo = ImageTk.PhotoImage(pil)
+                            try:
+                                avatar_cache[cache_key] = photo
+                            except Exception:
+                                pass
+                            try:
+                                label.configure(image=photo)
+                                label.image = photo
+                            except Exception:
+                                pass
+                            return
+                        except Exception:
+                            pass
+                    # Fallback: keep placeholder
+                except Exception:
+                    pass
+
+            try:
+                # schedule on the Tk main thread
+                app.after(0, on_main)
+            except Exception:
+                try:
+                    on_main()
+                except Exception:
+                    pass
+
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception:
+            pass
+
+    # Backwards-compatible wrapper that loads 50px avatars
+    def _load_avatar_async(label: tk.Label, url: Optional[str]):
+        _load_avatar_async_sized(label, url, 50)
 
     # Update label (optional)
     if update_message:
@@ -102,7 +290,7 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
     key_center.pack(side=tk.TOP)
 
     key_label = tk.Label(
-        key_center, text="Enter Key:", font=("Times New Roman", 12), fg="#ffffff", bg="#1a1a1a"
+        key_center, text="Player Key:", font=("Times New Roman", 12), fg="#ffffff", bg="#1a1a1a"
     )
     key_label.pack(side=tk.LEFT, padx=(0, 8))
 
@@ -119,21 +307,57 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
     )
     key_entry.pack(side=tk.LEFT)
 
-    # Activate button (kept centered alongside the key entry)
+    # Second row: ORG key input
+    org_center = tk.Frame(key_section, bg="#1a1a1a")
+    org_center.pack(side=tk.TOP, pady=(6, 0))
+
+    org_label = tk.Label(
+        org_center, text="ORG Key:", font=("Times New Roman", 12), fg="#ffffff", bg="#1a1a1a"
+    )
+    org_label.pack(side=tk.LEFT, padx=(0, 8))
+
+    org_key_entry = tk.Entry(
+        org_center,
+        width=30,
+        font=("Times New Roman", 12),
+        highlightthickness=2,
+        highlightbackground="#ff0000",
+        highlightcolor="#ff0000",
+        bg="#0a0a0a",
+        fg="#ffffff",
+        insertbackground="#ff5555"
+    )
+    org_key_entry.pack(side=tk.LEFT)
+
+    # Activate button (placed below both inputs)
     try:
         act_style = getattr(app, 'BUTTON_STYLE', {})
     except Exception:
         act_style = {}
-    activate_button = tk.Button(key_center, text="Activate", **act_style)
-    activate_button.pack(side=tk.LEFT, padx=(8, 0))
+    button_row = tk.Frame(key_section, bg="#1a1a1a")
+    button_row.pack(side=tk.TOP, pady=(10, 0))
+    activate_button = tk.Button(button_row, text="Activate", **act_style)
+    activate_button.pack()
+
+    # Placeholder for ORG key error (shown only when invalid) inside button row so it doesn't move the button row
+    org_error_label = tk.Label(
+        button_row,
+        text="",
+        font=("Times New Roman", 12),
+        fg="#ff5555",
+        bg="#1a1a1a",
+        wraplength=600,
+        justify="left",
+    )
+    # Not packed by default; controller will pack when needed under the Activate button
 
     # Help/instructions shown when a key is required
     try:
         help_text = (
-            "How to get a key:\n"
+            "How to get keys:\n"
             "1. Open the IronPoint Discord\n"
-            "2. In any channel, type /key-create\n"
-            "3. Copy-paste the key into the field above"
+            "2. Use /key-create to retrieve both keys\n"
+            "3. Paste both keys above, then click Activate"
         )
         key_help_label = tk.Label(
             key_section,
@@ -231,6 +455,9 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
         accent_color: Optional[str] = None,
         border_color: Optional[str] = None,
         insert_top: bool = False,
+        org_picture_url: Optional[str] = None,
+        victim_image_url: Optional[str] = None,
+        org_sid_tooltip: Optional[str] = None,
     ):
         colors = {
             'bg': '#1a1a1a',
@@ -258,9 +485,49 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
             try:
                 icon_lbl = tk.Label(card, image=icon, bg=colors['card_bg'])
                 icon_lbl.image = icon
-                icon_lbl.pack(side=tk.RIGHT, padx=8, pady=6)
+                icon_lbl.pack(side=tk.RIGHT, padx=(8, 8), pady=6)
             except Exception:
                 pass
+
+        # Small org image (25x25) to the left of the icon
+        try:
+            org_lbl = tk.Label(card, bg=colors['card_bg'])
+            ph_small = getattr(app, 'placeholder_org', None)
+            if ph_small is not None:
+                try:
+                    org_lbl.configure(image=ph_small)
+                    org_lbl.image = ph_small
+                except Exception:
+                    pass
+            # Tooltip with org SID on the org badge
+            if org_sid_tooltip:
+                try:
+                    _ToolTip(org_lbl, str(org_sid_tooltip))
+                except Exception:
+                    pass
+            if isinstance(org_picture_url, str) and org_picture_url.strip():
+                _load_avatar_async_sized(org_lbl, org_picture_url.strip(), 25)
+            org_lbl.pack(side=tk.RIGHT, padx=(0, 0), pady=6)
+        except Exception:
+            pass
+
+        # Victim avatar on the left, between accent bar and body
+        avatar_label = None
+        try:
+            placeholder = getattr(app, 'placeholder_avatar', None)
+            avatar_label = tk.Label(card, bg=colors['card_bg'])
+            if placeholder is not None:
+                try:
+                    avatar_label.configure(image=placeholder)
+                    avatar_label.image = placeholder
+                except Exception:
+                    pass
+            avatar_label.pack(side=tk.LEFT, padx=6, pady=6)
+            # Async load victim image from URL
+            if isinstance(victim_image_url, str) and victim_image_url.strip():
+                _load_avatar_async_sized(avatar_label, victim_image_url.strip(), 50)
+        except Exception:
+            avatar_label = None
 
         body = tk.Frame(card, bg=colors['card_bg'])
         body.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=8, pady=6)
@@ -404,8 +671,8 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
         pass
 
     # Public helpers for controllers to add/clear cards later
-    def add_pu_kill_card(title: str, subtitle: Optional[str] = None, meta: Optional[str] = None, icon: Optional[ImageTk.PhotoImage] = None, accent_color: Optional[str] = None, border_color: Optional[str] = None, insert_top: bool = False):
-        card = _add_kill_card(left_col['container'], title, subtitle, meta, icon=icon, accent_color=accent_color, border_color=border_color, insert_top=insert_top)
+    def add_pu_kill_card(title: str, subtitle: Optional[str] = None, meta: Optional[str] = None, icon: Optional[ImageTk.PhotoImage] = None, accent_color: Optional[str] = None, border_color: Optional[str] = None, insert_top: bool = False, org_picture_url: Optional[str] = None, org_sid: Optional[str] = None, victim_image_url: Optional[str] = None):
+        card = _add_kill_card(left_col['container'], title, subtitle, meta, icon=icon, accent_color=accent_color, border_color=border_color, insert_top=insert_top, org_picture_url=org_picture_url, victim_image_url=victim_image_url, org_sid_tooltip=org_sid)
         # Keep only the last 10 cards to limit memory usage
         try:
             children = list(left_col['container'].winfo_children())
@@ -419,8 +686,8 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
             pass
         return card
 
-    def add_ac_kill_card(title: str, subtitle: Optional[str] = None, meta: Optional[str] = None, icon: Optional[ImageTk.PhotoImage] = None, accent_color: Optional[str] = None, border_color: Optional[str] = None, insert_top: bool = False):
-        card = _add_kill_card(right_col['container'], title, subtitle, meta, icon=icon, accent_color=accent_color, border_color=border_color, insert_top=insert_top)
+    def add_ac_kill_card(title: str, subtitle: Optional[str] = None, meta: Optional[str] = None, icon: Optional[ImageTk.PhotoImage] = None, accent_color: Optional[str] = None, border_color: Optional[str] = None, insert_top: bool = False, org_picture_url: Optional[str] = None, org_sid: Optional[str] = None, victim_image_url: Optional[str] = None):
+        card = _add_kill_card(right_col['container'], title, subtitle, meta, icon=icon, accent_color=accent_color, border_color=border_color, insert_top=insert_top, org_picture_url=org_picture_url, victim_image_url=victim_image_url, org_sid_tooltip=org_sid)
         # Keep only the last 10 cards to limit memory usage
         try:
             children = list(right_col['container'].winfo_children())
@@ -545,8 +812,11 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
                     icon = getattr(app, 'icon_rifle', None) if is_fps else getattr(app, 'icon_ship', None)
                     accent = '#ff5555' if is_fps else '#3b82f6'
                     border = '#c9b037' if _is_recent(str(rec.get('timestamp') or '')) else None
+                    org_sid = rec.get('org_sid')
+                    org_pic = rec.get('org_picture')
+                    victim_img = rec.get('victim_image')
                     # Append in sorted (descending) order to keep newest at top
-                    add_fn(title, None, None, icon, accent, border, False)
+                    add_fn(title, None, None, icon, accent, border, False, org_pic, org_sid, victim_img)
                 except Exception:
                     continue
 
@@ -556,6 +826,9 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
     widgets.update({
         'key_section': key_section,
         'key_entry': key_entry,
+        'org_key_entry': org_key_entry,
+        'org_error_label': org_error_label,
+        'button_row': button_row,
         'activate_button': activate_button,
     'key_help_label': key_help_label,
         'pu_kills_frame': left_col['container'],

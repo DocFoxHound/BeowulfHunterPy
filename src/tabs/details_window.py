@@ -192,6 +192,8 @@ def open_details_window(app):
 
     sorted_items = sorted(unique_items, key=lambda it: (_parse_ts(str(it.get('timestamp') or '')) or datetime.fromtimestamp(0, tz=timezone.utc)), reverse=True)
 
+    # Log a few samples if location/coordinates appear missing to help debugging
+    missing_loc_samples = 0
     for rec in sorted_items:
         try:
             victims = rec.get('victims') if isinstance(rec.get('victims'), list) else []
@@ -203,8 +205,30 @@ def open_details_window(app):
             ship_used = rec.get('ship_used') or 'N/A'
             game_mode = rec.get('game_mode') or 'Unknown Mode'
             ts = rec.get('timestamp') or ''
-            secondary = f"Killed in: {ship_killed or 'Ship'}  |  Game Mode: {game_mode}"
-            meta = f"{ts}"
+            secondary = f"{game_mode}  |  {ship_killed or 'Ship'}  |   {ts}"
+            # Include location and coordinates when available; fall back gracefully
+            location = rec.get('location') or rec.get('zone') or 'Unknown Location'
+            coords = rec.get('coordinates') or rec.get('coords') or ''
+
+            # If location/coords are missing, log a couple of samples to inspect incoming data
+            try:
+                if ((not rec.get('location') and not rec.get('zone')) or not (rec.get('coordinates') or rec.get('coords'))):
+                    if missing_loc_samples < 3:
+                        keys_preview = ', '.join(list(rec.keys())[:15])
+                        global_variables.log(f"[DetailsWindow] Missing location/coords for record — ts={rec.get('timestamp')}, mode={rec.get('game_mode')}, keys=[{keys_preview}]")
+                        # Log the full record repr for deep inspection
+                        global_variables.log(f"[DetailsWindow] Record sample: {repr(rec)}")
+                        missing_loc_samples += 1
+            except Exception:
+                pass
+            if coords and isinstance(coords, str):
+                coords_text = coords
+            else:
+                coords_text = ''
+            if coords_text:
+                meta = f"Location: {location}  |  Coords: {coords_text}"
+            else:
+                meta = f"Location: {location}"
             border = '#c9b037' if _is_recent(str(ts)) else None
             _add_card(all_col['container'], title, secondary, meta, icon, accent, border)
         except Exception:
