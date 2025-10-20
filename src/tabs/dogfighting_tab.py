@@ -36,7 +36,6 @@ def _make_listbox_section(master: tk.Misc, title: str) -> Dict[str, Any]:
     content = tk.Frame(outer, bg=COLORS['bg'])
     content.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
 
-    yscroll = tk.Scrollbar(content, orient='vertical')
     lb = tk.Listbox(
         content,
         bg=COLORS['card_bg'],
@@ -48,11 +47,8 @@ def _make_listbox_section(master: tk.Misc, title: str) -> Dict[str, Any]:
         activestyle='none',
         font=("Times New Roman", 12)
     )
-    lb.configure(yscrollcommand=yscroll.set)
-    yscroll.configure(command=lb.yview)
 
     lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    yscroll.pack(side=tk.RIGHT, fill=tk.Y)
 
     # Keep row IDs parallel to rendered items so we can highlight a specific user
     lb._row_ids = []  # type: ignore[attr-defined]
@@ -82,7 +78,7 @@ def _make_listbox_section(master: tk.Misc, title: str) -> Dict[str, Any]:
                 except Exception:
                     text_val = str(value)
                 # Show value before the name so the important number is visible even if truncated
-                lb.insert(tk.END, f"{i}. {text_val} - {name}")
+                lb.insert(tk.END, f"{text_val} - {name}")
             _reset_row_styles()
         except Exception:
             pass
@@ -100,7 +96,7 @@ def _make_listbox_section(master: tk.Misc, title: str) -> Dict[str, Any]:
                 except Exception:
                     text_val = str(value)
                 # Show value before the name so the important number is visible even if truncated
-                lb.insert(tk.END, f"{i}. {text_val} - {name}")
+                lb.insert(tk.END, f"{text_val} - {name}")
             _reset_row_styles()
         except Exception:
             pass
@@ -135,7 +131,7 @@ def _make_listbox_section(master: tk.Misc, title: str) -> Dict[str, Any]:
         'outer': outer,
         'header': header,
         'listbox': lb,
-        'scrollbar': yscroll,
+        'scrollbar': None,  # scrollbar removed to save space
         'set_items': set_items,
         'set_items_and_ids': set_items_and_ids,
         'clear': clear,
@@ -160,8 +156,9 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
     # Configure main grid: 1 row, 2 columns (left charts, right actions)
     try:
         content_container.grid_rowconfigure(0, weight=1)
-        content_container.grid_columnconfigure(0, weight=1)  # charts area grows
-        content_container.grid_columnconfigure(1, weight=0, minsize=110)  # slimmer actions strip
+        # Allocate ~85/15 proportion between charts and actions. Keep a small min width for actions.
+        content_container.grid_columnconfigure(0, weight=85)  # charts area grows
+        content_container.grid_columnconfigure(1, weight=15, minsize=130)  # actions strip ~15%
     except Exception:
         pass
 
@@ -206,7 +203,8 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
 
     # Right-side Actions strip
     br_outer = tk.Frame(content_container, bg=COLORS['bg'], highlightthickness=1, highlightbackground=COLORS['border'])
-    br_outer.grid(row=0, column=1, sticky='ns', padx=(3, 6), pady=6)
+    # Fill the right-side column horizontally and vertically
+    br_outer.grid(row=0, column=1, sticky='nsew', padx=(3, 6), pady=6)
     refs['actions_area'] = br_outer
 
     actions_header = tk.Label(br_outer, text="Actions", fg=COLORS['fg'], bg=COLORS['bg'], font=("Times New Roman", 12, "bold"))

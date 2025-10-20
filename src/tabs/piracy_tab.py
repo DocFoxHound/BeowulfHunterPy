@@ -26,6 +26,10 @@ COLORS = {
     'gold': '#DAA520',
 }
 
+# Target minimum width for the right-side actions strip (in pixels)
+# Slimmer fixed minimum width for the right-side actions strip (in pixels)
+ACTION_STRIP_MIN_WIDTH = 250
+
 
 def _make_listbox_section(master: tk.Misc, title: str) -> Dict[str, Any]:
     """Create a titled section containing a Listbox + vertical scrollbar.
@@ -39,7 +43,6 @@ def _make_listbox_section(master: tk.Misc, title: str) -> Dict[str, Any]:
     content = tk.Frame(outer, bg=COLORS['bg'])
     content.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
 
-    yscroll = tk.Scrollbar(content, orient='vertical')
     lb = tk.Listbox(
         content,
         bg=COLORS['card_bg'],
@@ -51,11 +54,8 @@ def _make_listbox_section(master: tk.Misc, title: str) -> Dict[str, Any]:
         activestyle='none',
         font=("Times New Roman", 12)
     )
-    lb.configure(yscrollcommand=yscroll.set)
-    yscroll.configure(command=lb.yview)
 
     lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    yscroll.pack(side=tk.RIGHT, fill=tk.Y)
 
     # Keep row IDs parallel to rendered items so we can highlight a specific user
     lb._row_ids = []  # type: ignore[attr-defined]
@@ -85,7 +85,7 @@ def _make_listbox_section(master: tk.Misc, title: str) -> Dict[str, Any]:
                 except Exception:
                     text_val = str(value)
                 # Show value before the name so the important number is visible even if truncated
-                lb.insert(tk.END, f"{i}. {text_val} - {name}")
+                lb.insert(tk.END, f"{text_val} - {name}")
             _reset_row_styles()
         except Exception:
             pass
@@ -103,7 +103,7 @@ def _make_listbox_section(master: tk.Misc, title: str) -> Dict[str, Any]:
                 except Exception:
                     text_val = str(value)
                 # Show value before the name so the important number is visible even if truncated
-                lb.insert(tk.END, f"{i}. {text_val} - {name}")
+                lb.insert(tk.END, f"{text_val} - {name}")
             _reset_row_styles()
         except Exception:
             pass
@@ -138,7 +138,7 @@ def _make_listbox_section(master: tk.Misc, title: str) -> Dict[str, Any]:
         'outer': outer,
         'header': header,
         'listbox': lb,
-        'scrollbar': yscroll,
+        'scrollbar': None,  # scrollbar removed to save space
         'set_items': set_items,
         'set_items_and_ids': set_items_and_ids,
         'clear': clear,
@@ -163,8 +163,9 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
     # Configure main grid: 1 row, 2 columns (left charts, right actions)
     try:
         content_container.grid_rowconfigure(0, weight=1)
+        # Make the right column effectively fixed and let the left take all extra space.
         content_container.grid_columnconfigure(0, weight=1)  # charts area grows
-        content_container.grid_columnconfigure(1, weight=0, minsize=110)  # slimmer actions strip
+        content_container.grid_columnconfigure(1, weight=0, minsize=1)  # column size driven by child width
     except Exception:
         pass
 
@@ -201,15 +202,154 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
 
     # Right-side Actions strip
     br_outer = tk.Frame(content_container, bg=COLORS['bg'], highlightthickness=1, highlightbackground=COLORS['border'])
-    br_outer.grid(row=0, column=1, sticky='ns', padx=(3, 6), pady=6)
+    # Fill the entire right-side column horizontally and vertically
+    br_outer.grid(row=0, column=1, sticky='nsew', padx=(3, 3), pady=6)
+    # Prevent the right column from expanding to fit children; keep it slim
+    try:
+        br_outer.configure(width=ACTION_STRIP_MIN_WIDTH)
+        br_outer.grid_propagate(False)
+    except Exception:
+        pass
     refs['actions_area'] = br_outer
 
-    actions_header = tk.Label(br_outer, text="Actions", fg=COLORS['fg'], bg=COLORS['bg'], font=("Times New Roman", 12, "bold"))
+    actions_header = tk.Label(br_outer, text="Pirate Hits (10 most recent)", fg=COLORS['fg'], bg=COLORS['bg'], font=("Times New Roman", 12, "bold"))
     actions_header.pack(side=tk.TOP, anchor='w', padx=6, pady=(6, 4))
 
-    # Buttons container
+    # Buttons container (kept narrow; does not change layout widths)
     btns = tk.Frame(br_outer, bg=COLORS['bg'])
     btns.pack(side=tk.TOP, anchor='nw', fill=tk.X, padx=6, pady=(0, 6))
+
+    # Scrollable card list for latest pirate hits. We keep this inside the
+    # existing right-side column so overall grid widths remain unchanged.
+    cards_container = tk.Frame(br_outer, bg=COLORS['bg'])
+    cards_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
+
+    # Canvas + internal frame pattern for scrollable cards
+    cards_canvas = tk.Canvas(cards_container, bg=COLORS['bg'], highlightthickness=0, width=max(1, ACTION_STRIP_MIN_WIDTH - 8))
+    cards_scrollbar = tk.Scrollbar(cards_container, orient=tk.VERTICAL, command=cards_canvas.yview)
+    cards_inner = tk.Frame(cards_canvas, bg=COLORS['bg'])
+
+    cards_inner_id = cards_canvas.create_window((0, 0), window=cards_inner, anchor='nw')
+    cards_canvas.configure(yscrollcommand=cards_scrollbar.set)
+
+    cards_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    cards_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def _on_inner_config(event):
+        try:
+            # Update scroll region to encompass inner frame
+            cards_canvas.configure(scrollregion=cards_canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _on_canvas_config(event):
+        try:
+            # Match inner frame width to canvas width for full-width cards
+            cards_canvas.itemconfigure(cards_inner_id, width=event.width)
+        except Exception:
+            pass
+
+    cards_inner.bind("<Configure>", _on_inner_config)
+    cards_canvas.bind("<Configure>", _on_canvas_config)
+
+    def _fmt_int_commas(n: Any) -> str:
+        try:
+            return f"{int(n):,}"
+        except Exception:
+            return str(n)
+
+    def _build_card(parent: tk.Misc, hit: Dict[str, Any]) -> tk.Frame:
+        card = tk.Frame(parent, bg=COLORS['card_bg'], highlightthickness=1, highlightbackground=COLORS['border'])
+        # Owner = first assists_usernames entry; fallback to username
+        assists_usernames = hit.get('assists_usernames') or []
+        owner = None
+        if isinstance(assists_usernames, list) and assists_usernames:
+            try:
+                owner = str(assists_usernames[0])
+            except Exception:
+                owner = None
+        if not owner:
+            owner = str(hit.get('username') or 'Unknown')
+
+        title = str(hit.get('title') or '').strip() or 'Untitled Hit'
+        total_value = _fmt_int_commas(hit.get('total_value', 0))
+
+        # Header line: Owner • Title (wrap long titles to card width)
+        header = tk.Label(
+            card,
+            text=f"{owner} • {title}",
+            fg=COLORS['fg'],
+            bg=COLORS['card_bg'],
+            font=("Times New Roman", 12, "bold"),
+            justify=tk.LEFT,
+            wraplength=10,  # will be updated after geometry is known
+        )
+        header.pack(side=tk.TOP, anchor='w', padx=8, pady=(6, 2), fill=tk.X)
+
+        def _update_title_wrap(event=None, lbl=header, frame=card):
+            try:
+                w = frame.winfo_width()
+                if w and w > 1:
+                    # subtract horizontal padding (~16px for left/right)
+                    lbl.configure(wraplength=max(60, w - 16))
+            except Exception:
+                pass
+
+        # Update wrap on first layout and on subsequent resizes
+        try:
+            card.bind("<Configure>", _update_title_wrap)
+            header.after(0, _update_title_wrap)
+        except Exception:
+            pass
+
+        # Subheader: total value and assists count
+        try:
+            assists = hit.get('assists') or []
+            assists_count = len(assists) if isinstance(assists, list) else 0
+        except Exception:
+            assists_count = 0
+        sub = tk.Label(card, text=f"Value: {total_value}  •  Assists: {assists_count}", fg=COLORS['muted'], bg=COLORS['card_bg'], font=("Times New Roman", 11))
+        sub.pack(side=tk.TOP, anchor='w', padx=8, pady=(0, 4))
+
+        # Cargo list: each commodity_name on its own line
+        cargo = hit.get('cargo') or []
+        if isinstance(cargo, list) and cargo:
+            cargo_names: List[str] = []
+            for c in cargo:
+                try:
+                    nm = str((c or {}).get('commodity_name') or '').strip()
+                    if nm:
+                        cargo_names.append(nm)
+                except Exception:
+                    continue
+            if cargo_names:
+                cargo_lbl = tk.Label(card, text="\n".join(cargo_names), justify=tk.LEFT, fg=COLORS['fg'], bg=COLORS['card_bg'], font=("Times New Roman", 11))
+                cargo_lbl.pack(side=tk.TOP, anchor='w', padx=8, pady=(0, 8))
+
+        return card
+
+    def _set_hit_cards(hits: List[Dict[str, Any]]):
+        # Clear old cards
+        try:
+            for w in list(cards_inner.winfo_children()):
+                try:
+                    w.destroy()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Add cards, respecting current column width automatically via pack
+        try:
+            for hit in hits:
+                try:
+                    f = _build_card(cards_inner, hit)
+                    f.pack(side=tk.TOP, fill=tk.X, expand=False, padx=0, pady=(0, 6))
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    refs['set_pirate_hit_cards'] = _set_hit_cards
 
     # Button style (fallback if not provided by app)
     btn_style = {
@@ -228,7 +368,8 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
 
         def _update_ui(patch_version: str,
                         piracy_rows: List[dict],
-                        blackbox_rows: List[dict]):
+                        blackbox_rows: List[dict],
+                        latest_hits: List[dict]):
             # Save patch version globally
             try:
                 gv.set_patch_version(patch_version)
@@ -386,6 +527,12 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
             except Exception:
                 pass
 
+            # Latest hits cards
+            try:
+                _set_hit_cards(latest_hits or [])
+            except Exception:
+                pass
+
             # Highlight current user if present
             try:
                 current_uid = gv.get_user_id()
@@ -398,7 +545,7 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
                 pass
 
             try:
-                gv.log(f"Piracy data loaded for patch {patch_version}: piracy rows={len(piracy_rows)}, blackbox rows={len(blackbox_rows)}")
+                gv.log(f"Piracy data loaded for patch {patch_version}: piracy rows={len(piracy_rows)}, blackbox rows={len(blackbox_rows)}, latest_hits={len(latest_hits) if isinstance(latest_hits, list) else 0}")
             except Exception:
                 pass
 
@@ -416,13 +563,14 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
                 # Fetch data for that patch
                 piracy = ironpoint_api.get_piracy_summary(latest_patch) if latest_patch else []
                 blackbox = ironpoint_api.get_blackbox_summary(latest_patch) if latest_patch else []
+                hits_latest = ironpoint_api.get_latest_pirate_hits()
 
                 # Schedule UI update on main thread
                 try:
                     if app is not None:
-                        app.after(0, _update_ui, latest_patch, piracy, blackbox)
+                        app.after(0, _update_ui, latest_patch, piracy, blackbox, hits_latest)
                 except Exception:
-                    _update_ui(latest_patch, piracy, blackbox)
+                    _update_ui(latest_patch, piracy, blackbox, hits_latest)
             except Exception as e:
                 try:
                     gv.log(f"Piracy tab refresh failed: {e}")
@@ -461,17 +609,11 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
         'clear_all_piracy_lists': _placeholder_clear,
     })
 
-    # Action buttons (wire to placeholders; callers can reconfigure later)
-    refresh_btn = tk.Button(btns, text="Refresh", command=_refresh_from_api, **btn_style)
-    refresh_btn.pack(side=tk.TOP, fill=tk.X, padx=0, pady=(0, 6))
-    clear_btn = tk.Button(btns, text="Clear", command=_placeholder_clear, **btn_style)
-    clear_btn.pack(side=tk.TOP, fill=tk.X, padx=0, pady=(0, 6))
-    settings_btn = tk.Button(btns, text="Settings…", command=lambda: None, **btn_style)
+    # Actions: replace Settings with Add New; remove Refresh and Clear buttons
+    settings_btn = tk.Button(btns, text="Add New", command=lambda: None, **btn_style)
     settings_btn.pack(side=tk.TOP, fill=tk.X, padx=0, pady=(0, 6))
 
     refs.update({
-        'refresh_button': refresh_btn,
-        'clear_button': clear_btn,
         'settings_button': settings_btn,
     })
 

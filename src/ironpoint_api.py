@@ -23,6 +23,7 @@ ALLOWED_RANK_IDS = {
 _FILTERED_USER_ID_TO_NAME: Dict[str, str] = {}
 _ALL_USERS_FETCHED: bool = False
 _SUMMARY_CACHE: Dict[tuple, tuple] = {}
+_LATEST_HITS_CACHE: Dict[str, tuple] = {}
 
 
 def _get_json(url: str, timeout: float = 8.0) -> Any:
@@ -424,3 +425,48 @@ def get_user_display_name_fallback(user_id: str) -> str:
     except Exception:
         pass
     return user_id
+
+
+# --- Latest Pirate Hits ---
+def get_latest_pirate_hits(timeout: float = 8.0) -> List[Dict[str, Any]]:
+    """Return the latest pirate hits (up to 10) from the hittracker endpoint.
+
+    The endpoint returns the last 10 hits in reverse chronological order.
+    We cache for a short TTL to avoid hammering the API from the UI thread.
+    """
+    now = time.time()
+    cache_key = "hittracker/latest"
+    try:
+        cached = _LATEST_HITS_CACHE.get(cache_key)
+        # 20s TTL is enough for a manual-refresh UI
+        if cached and (now - cached[0] < 20):
+            return cached[1]  # type: ignore[index]
+    except Exception:
+        pass
+
+    url = f"{BASE_URL}/hittracker/latest"
+    try:
+        data = _get_json(url, timeout=timeout)
+        rows: List[Dict[str, Any]] = []
+        # Normalize to a list of dicts
+        if isinstance(data, list):
+            src = data
+        elif isinstance(data, dict):
+            src = [data]
+        else:
+            src = []
+        for item in src:
+            if not isinstance(item, dict):
+                continue
+            # Best-effort conversion of numeric fields to ints
+            try:
+                if "total_value" in item and item["total_value"] is not None:
+                    item["total_value"] = int(item["total_value"])  # type: ignore[assignment]
+            except Exception:
+                pass
+            rows.append(item)
+        _LATEST_HITS_CACHE[cache_key] = (now, rows)
+        return rows
+    except Exception:
+        # On failure, return empty list and do not raise (UI-friendly)
+        return []
