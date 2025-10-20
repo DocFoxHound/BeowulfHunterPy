@@ -6,9 +6,11 @@ import global_variables as gv
 try:
     # When imported as 'src.tabs.piracy_tab'
     from .. import ironpoint_api  # type: ignore
+    from . import add_hit_form  # type: ignore
 except Exception:
     # When imported as 'tabs.piracy_tab'
     import ironpoint_api  # type: ignore
+    from tabs import add_hit_form  # type: ignore
 
 # Builds the Piracy tab contents with four areas:
 # TL: leaderboard for most aUEC stolen
@@ -225,15 +227,13 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
     cards_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
 
     # Canvas + internal frame pattern for scrollable cards
+    # Note: We intentionally omit a visible scrollbar and rely on mouse wheel scrolling.
     cards_canvas = tk.Canvas(cards_container, bg=COLORS['bg'], highlightthickness=0, width=max(1, ACTION_STRIP_MIN_WIDTH - 8))
-    cards_scrollbar = tk.Scrollbar(cards_container, orient=tk.VERTICAL, command=cards_canvas.yview)
     cards_inner = tk.Frame(cards_canvas, bg=COLORS['bg'])
 
     cards_inner_id = cards_canvas.create_window((0, 0), window=cards_inner, anchor='nw')
-    cards_canvas.configure(yscrollcommand=cards_scrollbar.set)
 
     cards_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    cards_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
     def _on_inner_config(event):
         try:
@@ -251,6 +251,45 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
 
     cards_inner.bind("<Configure>", _on_inner_config)
     cards_canvas.bind("<Configure>", _on_canvas_config)
+
+    # Mouse wheel scrolling (hide scrollbar but allow scroll by wheel)
+    def _on_mousewheel(event):
+        try:
+            delta = 0
+            if hasattr(event, 'delta') and event.delta:
+                # Windows and macOS typically give multiples of 120
+                delta = int(-event.delta / 120)
+            elif hasattr(event, 'num'):
+                # X11/Linux: Button-4 (up), Button-5 (down)
+                if event.num == 4:
+                    delta = -1
+                elif event.num == 5:
+                    delta = 1
+            if delta != 0:
+                cards_canvas.yview_scroll(delta, "units")
+        except Exception:
+            pass
+
+    def _bind_wheel(_event=None):
+        try:
+            # Bind while pointer is over the cards area
+            cards_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            cards_canvas.bind_all("<Button-4>", _on_mousewheel)  # Linux scroll up
+            cards_canvas.bind_all("<Button-5>", _on_mousewheel)  # Linux scroll down
+        except Exception:
+            pass
+
+    def _unbind_wheel(_event=None):
+        try:
+            cards_canvas.unbind_all("<MouseWheel>")
+            cards_canvas.unbind_all("<Button-4>")
+            cards_canvas.unbind_all("<Button-5>")
+        except Exception:
+            pass
+
+    # Activate wheel scrolling when mouse enters the scrollable area
+    cards_container.bind("<Enter>", _bind_wheel)
+    cards_container.bind("<Leave>", _unbind_wheel)
 
     def _fmt_int_commas(n: Any) -> str:
         try:
@@ -282,6 +321,7 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
             bg=COLORS['card_bg'],
             font=("Times New Roman", 12, "bold"),
             justify=tk.LEFT,
+            anchor='w',
             wraplength=10,  # will be updated after geometry is known
         )
         header.pack(side=tk.TOP, anchor='w', padx=8, pady=(6, 2), fill=tk.X)
@@ -610,7 +650,10 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
     })
 
     # Actions: replace Settings with Add New; remove Refresh and Clear buttons
-    settings_btn = tk.Button(btns, text="Add New", command=lambda: None, **btn_style)
+    def _open_add_new_form():
+        add_hit_form.open_add_new(parent)
+
+    settings_btn = tk.Button(btns, text="Add New", command=_open_add_new_form, **btn_style)
     settings_btn.pack(side=tk.TOP, fill=tk.X, padx=0, pady=(0, 6))
 
     refs.update({
