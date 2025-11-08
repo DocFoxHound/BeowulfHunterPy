@@ -1,6 +1,7 @@
 import os
 import io
 import threading
+import re
 from datetime import datetime, timezone, timedelta
 import tkinter as tk
 from typing import Dict, Any, Optional, Callable
@@ -52,6 +53,8 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
         icon_ship = None
         placeholder_avatar = None
         placeholder_org = None
+        placeholder_avatar_small = None
+        placeholder_org_small = None
         if os.path.isfile(rifle_path):
             try:
                 _rifle_img = Image.open(rifle_path).resize((20, 20), Image.Resampling.LANCZOS)
@@ -94,6 +97,28 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
                 setattr(app, 'placeholder_avatar', placeholder_avatar)
             except Exception:
                 pass
+        # Create small (16x16) avatar placeholder for proximity reports
+        try:
+            _ph_small = Image.new('RGBA', (16, 16), (60, 60, 60, 255))
+            placeholder_avatar_small = ImageTk.PhotoImage(_ph_small)
+            widgets['placeholder_avatar_small'] = placeholder_avatar_small
+            try:
+                setattr(app, 'placeholder_avatar_small', placeholder_avatar_small)
+            except Exception:
+                pass
+        except Exception:
+            placeholder_avatar_small = None
+        # Small org placeholder (16x16) distinct shade
+        try:
+            _ph_org_small = Image.new('RGBA', (16, 16), (80, 80, 80, 255))
+            placeholder_org_small = ImageTk.PhotoImage(_ph_org_small)
+            widgets['placeholder_org_small'] = placeholder_org_small
+            try:
+                setattr(app, 'placeholder_org_small', placeholder_org_small)
+            except Exception:
+                pass
+        except Exception:
+            placeholder_org_small = None
         if placeholder_org is not None:
             widgets['placeholder_org'] = placeholder_org
             try:
@@ -111,6 +136,14 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
         pass
 
     avatar_cache: Dict[str, Any] = getattr(app, 'org_avatar_cache', {})
+
+    # Cache for proximity profile lookups: handle_lower -> {'avatar_img': PhotoImage|None, 'org_img': PhotoImage|None, 'org_name': str|None}
+    try:
+        if not hasattr(app, 'proximity_profile_cache') or not isinstance(getattr(app, 'proximity_profile_cache'), dict):
+            setattr(app, 'proximity_profile_cache', {})
+    except Exception:
+        pass
+    proximity_cache: Dict[str, Any] = getattr(app, 'proximity_profile_cache', {})
 
     # Simple tooltip helper for widgets
     class _ToolTip:
@@ -194,6 +227,132 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
                 return img.resize((size, size), Image.Resampling.LANCZOS)
             except Exception:
                 return img
+
+    # Fetch RSI profile details (avatar url, org image url, org name) — minimal HTML parse
+    def _fetch_rsi_profile(handle: str, timeout: int = 8):
+        if not handle:
+            return (None, None, None)
+        try:
+            h = str(handle).strip()
+            url = f"https://robertsspaceindustries.com/en/citizens/{h}"
+            headers = {
+                "User-Agent": "BeowulfHunter/1.0 (proximity)",
+                "Accept": "text/html,application/xhtml+xml",
+            }
+            resp = requests.get(url, headers=headers, timeout=timeout)
+            if resp.status_code != 200 or not resp.text:
+                return (None, None, None)
+            html = resp.text
+            # Avatar image (same pattern as scraper)
+            m_avatar = re.search(r'<span class="title">\s*Profile\s*</span>.*?<img\s+src="([^"]+)"', html, re.IGNORECASE | re.DOTALL)
+            # Org image and name under Main organization section
+            m_orgimg = re.search(r'<span class="title">\s*Main\s+organization\s*</span>.*?<img\s+src="([^"]+)"', html, re.IGNORECASE | re.DOTALL)
+            m_orgname = re.search(r'<span class="title">\s*Main\s+organization\s*</span>.*?<a[^>]*>([^<]+)</a>', html, re.IGNORECASE | re.DOTALL)
+            def _abs(u):
+                if not u:
+                    return None
+                return ("https://robertsspaceindustries.com" + u) if u.startswith("/") else u
+            avatar_url = _abs(m_avatar.group(1)) if m_avatar else None
+            orgimg_url = _abs(m_orgimg.group(1)) if m_orgimg else None
+            org_name = m_orgname.group(1).strip() if m_orgname else None
+            return (orgimg_url, avatar_url, org_name)
+        except Exception:
+            return (None, None, None)
+
+    # Download an image and convert to small square PhotoImage
+    def _download_photoimage(url: Optional[str], size: int = 16) -> Optional[ImageTk.PhotoImage]:
+        if not url:
+            return None
+        try:
+            r = requests.get(url, timeout=8)
+            if r.status_code != 200:
+                return None
+            im = Image.open(io.BytesIO(r.content)).convert('RGBA')
+            im = _make_square_thumbnail(im, size)
+            return ImageTk.PhotoImage(im)
+        except Exception:
+            return None
+
+    # Ensure labels show fetched avatar/org images and tooltip of org name
+    def _ensure_proximity_profile(avatar_label: tk.Label, org_label: tk.Label, handle: Optional[str]):
+        if not handle:
+            return
+        try:
+            key = str(handle).strip().lower()
+        except Exception:
+            key = None
+        if not key:
+            return
+        # If cached, set immediately
+        try:
+            cached = proximity_cache.get(key)
+            if isinstance(cached, dict):
+                av = cached.get('avatar_img')
+                og = cached.get('org_img')
+                if isinstance(av, ImageTk.PhotoImage):
+                    try:
+                        avatar_label.configure(image=av)
+                        avatar_label.image = av
+                    except Exception:
+                        pass
+                if isinstance(og, ImageTk.PhotoImage):
+                    try:
+                        org_label.configure(image=og)
+                        org_label.image = og
+                    except Exception:
+                        pass
+                # Tooltip
+                try:
+                    name = cached.get('org_name')
+                    if name:
+                        _ToolTip(org_label, str(name))
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
+
+        def worker():
+            orgimg_url, avatar_url, org_name = _fetch_rsi_profile(handle)
+            av_img = _download_photoimage(avatar_url, 16)
+            og_img = _download_photoimage(orgimg_url, 16)
+            def on_main():
+                try:
+                    # store in cache
+                    try:
+                        proximity_cache[key] = {'avatar_img': av_img, 'org_img': og_img, 'org_name': org_name}
+                    except Exception:
+                        pass
+                    if isinstance(av_img, ImageTk.PhotoImage):
+                        try:
+                            avatar_label.configure(image=av_img)
+                            avatar_label.image = av_img
+                        except Exception:
+                            pass
+                    if isinstance(og_img, ImageTk.PhotoImage):
+                        try:
+                            org_label.configure(image=og_img)
+                            org_label.image = og_img
+                        except Exception:
+                            pass
+                    try:
+                        if org_name:
+                            _ToolTip(org_label, str(org_name))
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            try:
+                app.after(0, on_main)
+            except Exception:
+                try:
+                    on_main()
+                except Exception:
+                    pass
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception:
+            pass
 
     # Async loader that updates a label with the avatar when ready (parametrized size)
     def _load_avatar_async_sized(label: tk.Label, url: Optional[str], size: int = 50):
@@ -375,6 +534,296 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
     # API status label removed in favor of banner indicator square
 
     # --- Two-column layout for kills (fills remaining space under key section) ---
+    # --- Player Events (Actor Stall / Fake Hit) area ---
+    # Placed above kill columns but below key section elements.
+    # Darker background for proximity reports
+    prox_bg = "#0a0a0a"  # darker than the main bg
+    player_events_outer = tk.Frame(parent, bg=prox_bg)
+    # Proximity Reports moved to the Proximity tab; do not pack in Main
+
+    # Header row with title and a temporary Inject Test button on the right
+    pe_header_row = tk.Frame(player_events_outer, bg=prox_bg)
+    pe_header_row.pack(side=tk.TOP, fill=tk.X)
+    pe_header = tk.Label(
+        pe_header_row,
+        text="Proximity Reports",
+        font=("Times New Roman", 14, "bold"),
+        fg="#ffffff",
+        bg=prox_bg
+    )
+    pe_header.pack(side=tk.LEFT, padx=4)
+    try:
+        style = getattr(app, 'BUTTON_STYLE', {})
+    except Exception:
+        style = {}
+    # Removed test buttons (Test Interdict / Test Nearby) from Main tab proximity header
+
+    # Scrollable horizontal frame? Requirement implies vertical list; implement vertical scroll.
+    pe_container_frame = tk.Frame(player_events_outer, bg=prox_bg)
+    pe_container_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=False)
+    # Shorter height (~80px)
+    pe_canvas = tk.Canvas(pe_container_frame, bg=prox_bg, highlightthickness=0, bd=0, height=80)
+    pe_scroll = tk.Scrollbar(pe_container_frame, orient='vertical', command=pe_canvas.yview)
+    pe_canvas.configure(yscrollcommand=pe_scroll.set)
+    pe_inner = tk.Frame(pe_canvas, bg=prox_bg)
+    pe_window_id = pe_canvas.create_window((0,0), window=pe_inner, anchor='nw')
+
+    def _pe_update_scroll(_evt=None):
+        try:
+            pe_canvas.configure(scrollregion=pe_canvas.bbox('all'))
+        except Exception:
+            pass
+
+    def _pe_resize_inner(evt):
+        try:
+            pe_canvas.itemconfig(pe_window_id, width=evt.width)
+        except Exception:
+            pass
+
+    pe_inner.bind('<Configure>', _pe_update_scroll)
+    pe_canvas.bind('<Configure>', _pe_resize_inner)
+
+    def _pe_on_mousewheel(event):
+        try:
+            steps = int(-1 * (event.delta / 120)) if event.delta else 0
+            if steps:
+                pe_canvas.yview_scroll(steps, 'units')
+        except Exception:
+            pass
+
+    pe_canvas.bind('<Enter>', lambda e: pe_canvas.bind_all('<MouseWheel>', _pe_on_mousewheel))
+    pe_canvas.bind('<Leave>', lambda e: pe_canvas.unbind_all('<MouseWheel>'))
+    pe_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    pe_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # Helper to build a condensed player card
+    def _add_player_event_card(kind: str, player: str, ship: Optional[str] = None, pinned_until: Optional[float] = None):
+        colors = {
+            'bg': '#070707',
+            'fg': '#ffffff',
+            'muted': '#bcbcd8',
+            'accent': '#ff5555',
+            'flash_a': '#5a0f0f',
+            'flash_b': '#0f0f0f',
+        }
+        outline = '#1f1f1f'
+        card = tk.Frame(pe_inner, bg=colors['bg'], highlightthickness=1, highlightbackground=outline)
+        # Minimal accent bar
+        bar_color = '#3b82f6' if kind == 'actor_stall' else colors['accent']
+        tk.Frame(card, bg=bar_color, width=2).pack(side=tk.LEFT, fill=tk.Y)
+
+        # Tiny avatar (16x16) and org icon (16x16) then single-line text
+        try:
+            ph_small = getattr(app, 'placeholder_avatar_small', None)
+        except Exception:
+            ph_small = None
+        try:
+            ph_org_small = getattr(app, 'placeholder_org_small', None)
+        except Exception:
+            ph_org_small = None
+        av = tk.Label(card, bg=colors['bg'])
+        if ph_small is not None:
+            try:
+                av.configure(image=ph_small)
+                av.image = ph_small
+            except Exception:
+                pass
+        av.pack(side=tk.LEFT, padx=(4,2), pady=2)
+        og = tk.Label(card, bg=colors['bg'])
+        if ph_org_small is not None:
+            try:
+                og.configure(image=ph_org_small)
+                og.image = ph_org_small
+            except Exception:
+                pass
+        og.pack(side=tk.LEFT, padx=(0,4), pady=2)
+
+        # Compose a single concise line
+        if kind == 'actor_stall':
+            text = f"Nearby — {player}"
+        else:
+            # Fake hit / Interdiction: show who interdicted whom when available
+            # Events now store from_player (interdictor) and player/target.
+            try:
+                # Attempt to extract richer context from fake hit events list
+                evs = global_variables.get_fake_hit_events() or []
+                context = None
+                for e in evs:
+                    if e.get('player') == player and e.get('ship') == ship:
+                        context = e
+                        break
+                from_p = context.get('from_player') if isinstance(context, dict) else None
+                target_p = context.get('target_player') if isinstance(context, dict) else player
+            except Exception:
+                from_p = None
+                target_p = player
+            suffix = f" ({ship})" if ship else ""
+            if from_p and target_p:
+                text = f"Interdicted — {from_p} → {target_p}{suffix}"
+            else:
+                text = f"Interdicted — {player}{suffix}"
+        tk.Label(card, text=text, font=("Times New Roman", 10), fg=colors['fg'], bg=colors['bg']).pack(side=tk.LEFT, padx=2)
+
+        # Trigger async fetch for real images and org name tooltip
+        try:
+            # Prefer interdictor's avatar when available on fake hits; else fall back to player
+            handle_for_avatar = player
+            if kind == 'fake_hit':
+                try:
+                    evs = global_variables.get_fake_hit_events() or []
+                    ctx = None
+                    for e in evs:
+                        if e.get('player') == player and e.get('ship') == ship:
+                            ctx = e
+                            break
+                    pref = ctx.get('from_player') if isinstance(ctx, dict) else None
+                    if pref:
+                        handle_for_avatar = pref
+                except Exception:
+                    handle_for_avatar = player
+            _ensure_proximity_profile(av, og, handle_for_avatar)
+        except Exception:
+            pass
+
+        # Insert at top respecting pinned fake hit ordering: pinned cards should stay above others.
+        if kind == 'fake_hit':
+            # Place at absolute top
+            try:
+                children = list(pe_inner.winfo_children())
+                if children:
+                    card.pack(fill=tk.X, padx=4, pady=(0,4), before=children[0])
+                else:
+                    card.pack(fill=tk.X, padx=4, pady=(0,4))
+            except Exception:
+                card.pack(fill=tk.X, padx=4, pady=(0,4))
+        else:
+            # Insert after any pinned fake hit cards (those with attribute _pinned=True)
+            try:
+                children = list(pe_inner.winfo_children())
+                insert_before = None
+                for child in children:
+                    if not getattr(child, '_pinned', False):
+                        insert_before = child
+                        break
+                if insert_before is not None:
+                    card.pack(fill=tk.X, padx=4, pady=(0,4), before=insert_before)
+                else:
+                    card.pack(fill=tk.X, padx=4, pady=(0,4))
+            except Exception:
+                card.pack(fill=tk.X, padx=4, pady=(0,4))
+
+        # Flashing for fake hit cards
+        if kind == 'fake_hit':
+            card._pinned = True  # mark pinned
+            card._pinned_until = pinned_until or 0
+            def _flash_state(state=[False]):
+                try:
+                    import time as _t
+                    now = _t.time()
+                    if now >= getattr(card, '_pinned_until', 0):
+                        # Stop flashing and unpin
+                        card._pinned = False
+                        try:
+                            card.configure(bg=colors['bg'])
+                        except Exception:
+                            pass
+                        return
+                    state[0] = not state[0]
+                    new_bg = colors['flash_a'] if state[0] else colors['flash_b']
+                    try:
+                        card.configure(bg=new_bg)
+                        for ch in card.winfo_children():
+                            try:
+                                ch.configure(bg=new_bg)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    try:
+                        card.after(500, _flash_state)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            try:
+                _flash_state()
+            except Exception:
+                pass
+        return card
+
+    def refresh_player_events():
+        """Rebuild player events area from global state (efficient enough given small sizes)."""
+        # Prune expired fake hit events first
+        try:
+            import time as _t
+            global_variables.prune_expired_fake_hit_events(_t.time())
+        except Exception:
+            pass
+        # Clear existing cards
+        try:
+            for ch in list(pe_inner.winfo_children()):
+                ch.destroy()
+        except Exception:
+            pass
+        # Fetch events
+        try:
+            stall_events = global_variables.get_actor_stall_events()
+        except Exception:
+            stall_events = []
+        try:
+            fake_events = global_variables.get_fake_hit_events()
+        except Exception:
+            fake_events = []
+        # Render fake hits first (newest last in storage; show newest first)
+        try:
+            # sort fake events by timestamp descending (string compare fallback)
+            fe_sorted = list(fake_events)
+            fe_sorted.reverse()
+            import time as _t
+            now_ts = _t.time()
+            for ev in fe_sorted:
+                _add_player_event_card('fake_hit', ev.get('player'), ev.get('ship'), pinned_until=ev.get('expires_at'))
+            # Then actor stall (newest last -> show newest first underneath pinned region)
+            se_sorted = list(stall_events)
+            se_sorted.reverse()
+            for ev in se_sorted:
+                _add_player_event_card('actor_stall', ev.get('player'))
+        except Exception:
+            pass
+
+    # Expose refresh & add helpers (controllers may push events directly if desired)
+    def add_actor_stall_card(player: str):
+        return _add_player_event_card('actor_stall', player)
+
+    def add_fake_hit_card(player: str, ship: Optional[str], pinned_until: Optional[float]):
+        return _add_player_event_card('fake_hit', player, ship, pinned_until=pinned_until)
+
+    # Initial empty build
+    try:
+        refresh_player_events()
+    except Exception:
+        pass
+
+    # Optional: helper to inject test proximity events into globals and refresh UI
+    def inject_test_proximity_events():
+        try:
+            import time as _t
+            now = _t.time()
+            # Simulate 3 actor stalls and 2 fake hits
+            try:
+                global_variables.add_actor_stall_event({'timestamp': '2025-11-07T00:00:00Z', 'player': 'TestPilotA'})
+                global_variables.add_actor_stall_event({'timestamp': '2025-11-07T00:00:05Z', 'player': 'TestPilotB'})
+                global_variables.add_actor_stall_event({'timestamp': '2025-11-07T00:00:10Z', 'player': 'TestPilotC'})
+            except Exception:
+                pass
+            try:
+                global_variables.add_fake_hit_event({'timestamp': '2025-11-07T00:01:00Z', 'player': 'InterceptorOne', 'ship': 'ANVL_Glade', 'expires_at': now + 10})
+                global_variables.add_fake_hit_event({'timestamp': '2025-11-07T00:01:05Z', 'player': 'Scarecrow_iso', 'ship': 'MISC_Hull_C', 'expires_at': now + 10})
+            except Exception:
+                pass
+            refresh_player_events()
+        except Exception:
+            pass
     # Helper to create a scrollable column with a header
     def _make_scrollable_column(master: tk.Misc, title: str) -> Dict[str, Any]:
         colors = {
@@ -617,6 +1066,33 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
     details_btn = tk.Button(middle_col, text="Details", command=lambda: open_details_window(app), **style)
     details_btn.pack(side=tk.TOP, pady=(28, 0))
 
+    # Processing count label (hidden unless >0)
+    processing_label = tk.Label(middle_col, text="", font=("Times New Roman", 11, "bold"), fg="#f5f5f5", bg="#1a1a1a")
+
+    def update_processing_label():
+        try:
+            count = global_variables.get_kill_processing_count()
+        except Exception:
+            count = 0
+        if count > 0:
+            try:
+                processing_label.config(text=f"Processing: {count}")
+            except Exception:
+                pass
+            # Pack if not already visible
+            try:
+                if not processing_label.winfo_ismapped():
+                    processing_label.pack(side=tk.TOP, pady=(8, 0))
+            except Exception:
+                pass
+        else:
+            # Hide when zero
+            try:
+                if processing_label.winfo_ismapped():
+                    processing_label.pack_forget()
+            except Exception:
+                pass
+
     # Header count helpers
     def _set_header_count(col: Dict[str, Any], base_title: str, count: int):
         try:
@@ -727,12 +1203,20 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
         pu_items = []
         ac_items = []
 
-        def _is_ac_mode(mode: str) -> bool:
-            m = (mode or '').lower()
-            return m in (
+        def _is_ac_record(rec: Dict[str, Any]) -> bool:
+            # Determine AC using both game_mode and zone/location heuristics
+            mode = (rec.get('game_mode') or '').lower()
+            if mode in (
                 'arena_commander', 'ac', 'electronic_access', 'ea_starfighter',
                 'ea_duel', 'ea_freeflight', 'ea_vanduul_swarm'
-            ) or any(x in m for x in ('arena', 'electronic access'))
+            ) or any(x in mode for x in ('arena', 'electronic access')):
+                return True
+            zone = (rec.get('zone') or rec.get('location') or rec.get('map') or '')
+            zl = zone.lower()
+            # Common AC map cues
+            if any(k in zl for k in ('dying star', 'broken moon', 'electronic access', 'arena')):
+                return True
+            return False
 
         # Normalize and split
         for it in all_items:
@@ -744,7 +1228,7 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
                 if key in seen:
                     continue
                 seen.add(key)
-                if _is_ac_mode(it.get('game_mode') or ''):
+                if _is_ac_record(it):
                     ac_items.append(it)
                 else:
                     pu_items.append(it)
@@ -837,6 +1321,8 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
         'ac_kills_outer': right_col['outer'],
     'details_container': middle_col,
     'details_button': details_btn,
+    'processing_label': processing_label,
+    'update_processing_label': update_processing_label,
         'add_pu_kill_card': add_pu_kill_card,
         'add_ac_kill_card': add_ac_kill_card,
         'clear_pu_kills': clear_pu_kills,
@@ -848,5 +1334,10 @@ def build(parent: tk.Misc, app, banner_path: Optional[str] = None, update_messag
         'inc_ac_kills_count': inc_ac_kills_count,
         'hide_kill_columns': hide_kill_columns,
         'show_kill_columns': show_kill_columns,
+            'player_events_outer': player_events_outer,
+            'refresh_player_events': refresh_player_events,
+            'add_actor_stall_card': add_actor_stall_card,
+            'add_fake_hit_card': add_fake_hit_card,
+            'inject_test_proximity_events': inject_test_proximity_events,
     })
     return widgets

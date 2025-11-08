@@ -20,6 +20,7 @@ import parser
 from tabs import main_tab as main_tab_builder
 from tabs import piracy_tab as piracy_tab_builder
 from tabs import dogfighting_tab as dogfighting_tab_builder
+from tabs import proximity_tab as proximity_tab_builder
 from tabs import log_tab as log_tab_builder
 from controllers.key_controller import KeyController
 from controllers.game_controller import GameController
@@ -32,7 +33,8 @@ def setup_gui(game_running):
     app = tk.Tk()
     app.title("BeowulfHunter")
     app.geometry("650x400")
-    app.resizable(False, False)
+    # Default size, but allow user resizing
+    app.resizable(True, True)
     app.configure(bg="#1a1a1a")
     # Expose BUTTON_STYLE for other modules (e.g., controllers)
     setattr(app, 'BUTTON_STYLE', BUTTON_STYLE)
@@ -79,11 +81,13 @@ def setup_gui(game_running):
     main_tab = ttk.Frame(notebook, style='Dark.TFrame')
     piracy_tab = ttk.Frame(notebook, style='Dark.TFrame')
     dogfighting_tab = ttk.Frame(notebook, style='Dark.TFrame')
+    proximity_tab = ttk.Frame(notebook, style='Dark.TFrame')
     log_tab = ttk.Frame(notebook, style='Dark.TFrame')
 
     notebook.add(main_tab, text="Main")
     notebook.add(piracy_tab, text="Piracy")
     notebook.add(dogfighting_tab, text="Dogfighting")
+    notebook.add(proximity_tab, text="Proximity")
     notebook.add(log_tab, text="Log")
     # Make the notebook fill the entire application window
     notebook.pack(padx=0, pady=0, fill=tk.BOTH, expand=True)
@@ -94,6 +98,7 @@ def setup_gui(game_running):
         'main': main_tab,
         'piracy': piracy_tab,
         'dogfighting': dogfighting_tab,
+        'proximity': proximity_tab,
         'log': log_tab,
     })
 
@@ -108,8 +113,14 @@ def setup_gui(game_running):
     log_refs = log_tab_builder.build(log_tab, app)
     piracy_refs = piracy_tab_builder.build(piracy_tab)
     dogfighting_refs = dogfighting_tab_builder.build(dogfighting_tab)
+    proximity_refs = proximity_tab_builder.build(proximity_tab)
     setattr(app, 'piracy_tab_refs', piracy_refs)
     setattr(app, 'dogfighting_tab_refs', dogfighting_refs)
+    setattr(app, 'proximity_tab_refs', proximity_refs)
+    try:
+        global_variables.set_proximity_tab_refs(proximity_refs)
+    except Exception:
+        pass
 
     # Make the logger reference easily available
     text_area = log_refs.get('log_text_area')
@@ -126,18 +137,7 @@ def setup_gui(game_running):
 
     # No footer; notebook uses entire window
 
-    # Lock the window size after layout so subsequent font changes inside
-    # the text widget don't cause the toplevel to request a new geometry.
-    try:
-        app.update_idletasks()
-        w = app.winfo_width()
-        h = app.winfo_height()
-        # Prevent the window from resizing due to internal widget requests
-        app.minsize(w, h)
-        app.maxsize(w, h)
-    except Exception:
-        # If anything fails here, don't block GUI startup; it's non-fatal.
-        pass
+    # Keep default geometry but don't lock min/max; allow user to resize freely
 
     return app, None
 
@@ -242,16 +242,7 @@ def initialize_game_gui(app):
     except Exception:
         pass
 
-    # Ensure the main window size is fixed after layout so changing the
-    # text widget font size doesn't cause the toplevel to resize.
-    try:
-        app.update_idletasks()
-        w = app.winfo_width()
-        h = app.winfo_height()
-        app.minsize(w, h)
-        app.maxsize(w, h)
-    except Exception:
-        pass
+    # Allow the main window to resize; avoid locking min/max dimensions here
 
 
     # Old monitoring helpers removed; logic lives in controllers.game_controller

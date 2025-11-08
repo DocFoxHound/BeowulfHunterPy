@@ -163,9 +163,9 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
     # Configure main grid: 1 row, 2 columns (left charts, right actions)
     try:
         content_container.grid_rowconfigure(0, weight=1)
-        # Make the right column effectively fixed and let the left take all extra space.
-        content_container.grid_columnconfigure(0, weight=1)  # charts area grows
-        content_container.grid_columnconfigure(1, weight=0, minsize=1)  # column size driven by child width
+        # Let the charts area take ~85% and the actions strip ~15%, with a sensible minimum width.
+        content_container.grid_columnconfigure(0, weight=85)  # charts area grows
+        content_container.grid_columnconfigure(1, weight=15, minsize=ACTION_STRIP_MIN_WIDTH)  # actions strip grows too
     except Exception:
         pass
 
@@ -202,22 +202,12 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
 
     # Right-side Actions strip
     br_outer = tk.Frame(content_container, bg=COLORS['bg'], highlightthickness=1, highlightbackground=COLORS['border'])
-    # Fill the entire right-side column horizontally and vertically
+    # Fill the entire right-side column horizontally and vertically; allow it to expand
     br_outer.grid(row=0, column=1, sticky='nsew', padx=(3, 3), pady=6)
-    # Prevent the right column from expanding to fit children; keep it slim
-    try:
-        br_outer.configure(width=ACTION_STRIP_MIN_WIDTH)
-        br_outer.grid_propagate(False)
-    except Exception:
-        pass
     refs['actions_area'] = br_outer
 
     actions_header = tk.Label(br_outer, text="Pirate Hits (10 most recent)", fg=COLORS['fg'], bg=COLORS['bg'], font=("Times New Roman", 12, "bold"))
     actions_header.pack(side=tk.TOP, anchor='w', padx=6, pady=(6, 4))
-
-    # Buttons container (kept narrow; does not change layout widths)
-    btns = tk.Frame(br_outer, bg=COLORS['bg'])
-    btns.pack(side=tk.TOP, anchor='nw', fill=tk.X, padx=6, pady=(0, 6))
 
     # Scrollable card list for latest pirate hits. We keep this inside the
     # existing right-side column so overall grid widths remain unchanged.
@@ -225,7 +215,8 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
     cards_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
 
     # Canvas + internal frame pattern for scrollable cards
-    cards_canvas = tk.Canvas(cards_container, bg=COLORS['bg'], highlightthickness=0, width=max(1, ACTION_STRIP_MIN_WIDTH - 8))
+    # Canvas without fixed width so it expands with the container
+    cards_canvas = tk.Canvas(cards_container, bg=COLORS['bg'], highlightthickness=0)
     cards_scrollbar = tk.Scrollbar(cards_container, orient=tk.VERTICAL, command=cards_canvas.yview)
     cards_inner = tk.Frame(cards_canvas, bg=COLORS['bg'])
 
@@ -351,16 +342,7 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
 
     refs['set_pirate_hit_cards'] = _set_hit_cards
 
-    # Button style (fallback if not provided by app)
-    btn_style = {
-        "bg": "#0f0f0f",
-        "fg": "#ff5555",
-        "activebackground": "#330000",
-        "activeforeground": "#ffffff",
-        "relief": "ridge",
-        "bd": 2,
-        "font": ("Times New Roman", 12),
-    }
+    # No action buttons are required here anymore; only the latest hits list is shown.
 
     def _refresh_from_api():
         """Fetch latest patch and leaderboard data from the IronPoint API and update UI."""
@@ -609,13 +591,7 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
         'clear_all_piracy_lists': _placeholder_clear,
     })
 
-    # Actions: replace Settings with Add New; remove Refresh and Clear buttons
-    settings_btn = tk.Button(btns, text="Add New", command=lambda: None, **btn_style)
-    settings_btn.pack(side=tk.TOP, fill=tk.X, padx=0, pady=(0, 6))
-
-    refs.update({
-        'settings_button': settings_btn,
-    })
+    # Removed deprecated "Insert Hit"/"Add New" actions and buttons.
 
     # Seed with example data so the UI looks alive on first open
     try:

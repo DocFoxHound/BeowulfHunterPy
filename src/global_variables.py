@@ -2,6 +2,7 @@ import tkinter as tk
 import functools
 import traceback
 import os
+import time
 
 class EventLogger:
     def __init__(self, text_widget):
@@ -46,6 +47,23 @@ main_tab_refs = {}
 # When True, `log()` will suppress writing messages (useful during bulk ops)
 suppress_logs = False
 org_key = None
+custom_sound_interdiction = None  # absolute path to custom sound for Interdicted (Fake Hit)
+custom_sound_nearby = None        # absolute path to custom sound for Nearby (Actor Stall)
+custom_sound_kill = None          # absolute path to custom sound for Kill event
+overlay_corner = 'top-right'      # 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
+overlay_enabled = False
+overlay_manager = None
+overlay_show_kills = True
+overlay_show_interdictions = True
+overlay_show_nearby = True
+
+# Sound/notice toggle flags
+play_kill_sound = True
+play_snare_sound = True       # snare == interdiction/fake_hit
+play_proximity_sound = True   # proximity == actor_stall
+
+# Optional separate refs for Proximity tab
+proximity_tab_refs = {}
 
 # Current game patch version (e.g., "4.3") discovered from remote API
 patch_version = None
@@ -59,6 +77,18 @@ api_kills_all = []         # combined list in API-like schema (API + live)
 all_kills = []
  # Last failed uploads from backup parsing (list of parsed kill dicts)
 last_failed_uploads = []
+kill_processing_count = 0
+
+# --- Player event tracking (Actor Stall + Fake Hit/Interdiction) ---
+# Stored as simple dict records so UI can render without reparsing.
+# actor_stall_events: list of { 'timestamp': str, 'player': str }
+# fake_hit_events: list of { 'timestamp': str, 'player': str, 'ship': Optional[str], 'expires_at': float }
+actor_stall_events = []
+fake_hit_events = []
+
+# Limits
+ACTOR_STALL_MAX = 100
+FAKE_HIT_MAX = 10  # keep a small history; UI will pin newest for 10s
 
 def set_rsi_handle(handle):
     global rsi_handle
@@ -87,6 +117,192 @@ def set_org_key(text):
 
 def get_org_key():
     return org_key
+
+# --- Custom sound paths (user-configurable) ---
+def set_custom_sound_interdiction(path: str | None):
+    global custom_sound_interdiction
+    try:
+        custom_sound_interdiction = str(path) if path else None
+    except Exception:
+        custom_sound_interdiction = None
+
+def get_custom_sound_interdiction() -> str | None:
+    try:
+        return custom_sound_interdiction
+    except Exception:
+        return None
+
+def set_custom_sound_nearby(path: str | None):
+    global custom_sound_nearby
+    try:
+        custom_sound_nearby = str(path) if path else None
+    except Exception:
+        custom_sound_nearby = None
+
+def get_custom_sound_nearby() -> str | None:
+    try:
+        return custom_sound_nearby
+    except Exception:
+        return None
+
+def set_custom_sound_kill(path: str | None):
+    global custom_sound_kill
+    try:
+        custom_sound_kill = str(path) if path else None
+    except Exception:
+        custom_sound_kill = None
+
+def get_custom_sound_kill() -> str | None:
+    try:
+        return custom_sound_kill
+    except Exception:
+        return None
+
+# --- Overlay settings and manager ---
+def set_overlay_corner(pos: str):
+    global overlay_corner
+    try:
+        if str(pos) in ('top-left', 'top-right', 'bottom-left', 'bottom-right'):
+            overlay_corner = str(pos)
+    except Exception:
+        pass
+
+def get_overlay_corner() -> str:
+    try:
+        return overlay_corner
+    except Exception:
+        return 'top-right'
+
+def set_overlay_enabled(enabled: bool):
+    global overlay_enabled
+    try:
+        overlay_enabled = bool(enabled)
+    except Exception:
+        overlay_enabled = False
+
+def is_overlay_enabled() -> bool:
+    try:
+        return bool(overlay_enabled)
+    except Exception:
+        return False
+
+def set_overlay_manager(mgr):
+    global overlay_manager
+    overlay_manager = mgr
+
+def get_overlay_manager():
+    return overlay_manager
+
+def set_overlay_filters(show_kills: bool | None = None, show_interdictions: bool | None = None, show_nearby: bool | None = None):
+    global overlay_show_kills, overlay_show_interdictions, overlay_show_nearby
+    try:
+        if show_kills is not None:
+            overlay_show_kills = bool(show_kills)
+        if show_interdictions is not None:
+            overlay_show_interdictions = bool(show_interdictions)
+        if show_nearby is not None:
+            overlay_show_nearby = bool(show_nearby)
+    except Exception:
+        pass
+
+def get_overlay_filters():
+    try:
+        return {
+            'kills': bool(overlay_show_kills),
+            'interdictions': bool(overlay_show_interdictions),
+            'nearby': bool(overlay_show_nearby),
+        }
+    except Exception:
+        return {'kills': True, 'interdictions': True, 'nearby': True}
+
+# Show/Play toggles API
+def set_show_kill_notice(val: bool):
+    try:
+        set_overlay_filters(show_kills=bool(val))
+    except Exception:
+        pass
+
+def get_show_kill_notice() -> bool:
+    try:
+        return bool(overlay_show_kills)
+    except Exception:
+        return True
+
+def set_show_snare_notice(val: bool):
+    try:
+        set_overlay_filters(show_interdictions=bool(val))
+    except Exception:
+        pass
+
+def get_show_snare_notice() -> bool:
+    try:
+        return bool(overlay_show_interdictions)
+    except Exception:
+        return True
+
+def set_show_proximity_notice(val: bool):
+    try:
+        set_overlay_filters(show_nearby=bool(val))
+    except Exception:
+        pass
+
+def get_show_proximity_notice() -> bool:
+    try:
+        return bool(overlay_show_nearby)
+    except Exception:
+        return True
+
+def set_play_kill_sound(val: bool):
+    global play_kill_sound
+    try:
+        play_kill_sound = bool(val)
+    except Exception:
+        play_kill_sound = True
+
+def get_play_kill_sound() -> bool:
+    try:
+        return bool(play_kill_sound)
+    except Exception:
+        return True
+
+def set_play_snare_sound(val: bool):
+    global play_snare_sound
+    try:
+        play_snare_sound = bool(val)
+    except Exception:
+        play_snare_sound = True
+
+def get_play_snare_sound() -> bool:
+    try:
+        return bool(play_snare_sound)
+    except Exception:
+        return True
+
+def set_play_proximity_sound(val: bool):
+    global play_proximity_sound
+    try:
+        play_proximity_sound = bool(val)
+    except Exception:
+        play_proximity_sound = True
+
+def get_play_proximity_sound() -> bool:
+    try:
+        return bool(play_proximity_sound)
+    except Exception:
+        return True
+
+def set_proximity_tab_refs(refs):
+    global proximity_tab_refs
+    try:
+        proximity_tab_refs = dict(refs) if refs is not None else {}
+    except Exception:
+        proximity_tab_refs = {}
+
+def get_proximity_tab_refs():
+    try:
+        return proximity_tab_refs
+    except Exception:
+        return {}
 
 def set_rsi_handle(handle):
     global rsi_handle
@@ -262,6 +478,98 @@ def set_last_failed_uploads(items):
 def get_last_failed_uploads():
     """Return the last failed upload records from backup parsing (list of dicts)."""
     return last_failed_uploads
+
+
+# --- kill processing count ---
+def set_kill_processing_count(n: int):
+    global kill_processing_count
+    try:
+        kill_processing_count = int(n)
+    except Exception:
+        pass
+
+
+def get_kill_processing_count() -> int:
+    try:
+        return int(kill_processing_count)
+    except Exception:
+        return 0
+
+
+def inc_kill_processing_count(delta: int = 1) -> int:
+    try:
+        set_kill_processing_count(get_kill_processing_count() + int(delta))
+        return get_kill_processing_count()
+    except Exception:
+        return get_kill_processing_count()
+
+
+def dec_kill_processing_count(delta: int = 1) -> int:
+    try:
+        set_kill_processing_count(max(0, get_kill_processing_count() - int(delta)))
+        return get_kill_processing_count()
+    except Exception:
+        return get_kill_processing_count()
+
+
+# --- Player event helpers ---
+def add_actor_stall_event(event: dict):
+    """Append an actor stall event (trim list to ACTOR_STALL_MAX)."""
+    try:
+        global actor_stall_events
+        rec = dict(event)
+        try:
+            rec['overlay_added'] = time.time()
+        except Exception:
+            pass
+        actor_stall_events.append(rec)
+        if len(actor_stall_events) > ACTOR_STALL_MAX:
+            # keep newest N (events appended in chronological order from log tail)
+            actor_stall_events = actor_stall_events[-ACTOR_STALL_MAX:]
+    except Exception:
+        pass
+
+
+def get_actor_stall_events():
+    try:
+        return list(actor_stall_events)
+    except Exception:
+        return []
+
+
+def add_fake_hit_event(event: dict):
+    """Add a fake hit (interdiction) event. Maintain max size; newest at end.
+
+    Expects keys: 'timestamp', 'player', 'ship', 'expires_at'.
+    """
+    try:
+        global fake_hit_events
+        rec = dict(event)
+        try:
+            rec['overlay_added'] = time.time()
+        except Exception:
+            pass
+        fake_hit_events.append(rec)
+        if len(fake_hit_events) > FAKE_HIT_MAX:
+            fake_hit_events = fake_hit_events[-FAKE_HIT_MAX:]
+    except Exception:
+        pass
+
+
+def get_fake_hit_events():
+    try:
+        return list(fake_hit_events)
+    except Exception:
+        return []
+
+
+def prune_expired_fake_hit_events(now_ts: float):
+    """Remove expired fake hit events (where expires_at < now_ts)."""
+    try:
+        global fake_hit_events
+        fake_hit_events = [e for e in fake_hit_events if (e.get('expires_at') or 0) >= now_ts]
+    except Exception:
+        pass
 
 
 def log(message):

@@ -1,4 +1,6 @@
 import requests
+import os
+import sys
 import datetime
 from config import set_sc_log_location, get_player_name
 import global_variables
@@ -6,6 +8,43 @@ import global_variables
 local_version = "7.0"
 api_key = {"value": None}
 org_api_key = {"value": None}
+
+# Optional custom sound paths (persisted in config lines 3, 4 & 5 if present)
+custom_sound_interdiction = {"value": None}
+custom_sound_nearby = {"value": None}
+custom_sound_kill = {"value": None}
+
+def _get_assets_dir() -> str:
+    """Return the assets directory for default resources.
+
+    - In PyInstaller onefile, use sys._MEIPASS/assets
+    - From source, prefer project_root/assets (where project_root is parent of 'src')
+    - Fallback to CWD/assets
+    """
+    # PyInstaller onefile extraction folder
+    try:
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass and os.path.isdir(meipass):
+            p = os.path.join(meipass, "assets")
+            if os.path.isdir(p):
+                return p
+    except Exception:
+        pass
+    # Source: try parent of src (keys.py lives in src/)
+    try:
+        src_dir = os.path.dirname(__file__)
+        project_root = os.path.abspath(os.path.join(src_dir, os.pardir))
+        p = os.path.join(project_root, "assets")
+        if os.path.isdir(p):
+            return p
+    except Exception:
+        pass
+    # Fallback to CWD/assets
+    try:
+        p = os.path.join(os.getcwd(), "assets")
+        return p
+    except Exception:
+        return "assets"
 
 
 @global_variables.log_exceptions
@@ -96,15 +135,30 @@ def validate_api_key(api_key, rsi_handle):
 
 @global_variables.log_exceptions
 def save_api_key(key, org_key: str | None = None):
-    """Save the player key on the first line and the org key on the second line.
+    """Save keys (line1 player, line2 org) preserving any existing custom sound paths (lines 3 & 4).
 
-    If org_key is None, we still write a trailing newline to keep two-line format.
+    If custom sound paths were previously stored they are re-appended. Backwards compatible with legacy 1-2 line files.
     """
     try:
         line1 = (key or "").strip()
         line2 = (org_key or "").strip()
+        # Load existing to retain sound paths
+        existing_lines = []
+        try:
+            with open("killtracker_key.cfg", "r", encoding="utf-8") as f:
+                existing_lines = f.read().splitlines()
+        except Exception:
+            existing_lines = []
+
+        snd_interdiction = existing_lines[2].strip() if len(existing_lines) >= 3 else (custom_sound_interdiction["value"] or "")
+        snd_nearby = existing_lines[3].strip() if len(existing_lines) >= 4 else (custom_sound_nearby["value"] or "")
+        snd_kill = existing_lines[4].strip() if len(existing_lines) >= 5 else (custom_sound_kill["value"] or "")
+        out_lines = [line1, line2, snd_interdiction, snd_nearby, snd_kill]
+        # Trim trailing empty lines while ensuring at least 2 lines persist
+        while len(out_lines) > 2 and out_lines[-1] == "":
+            out_lines.pop()
         with open("killtracker_key.cfg", "w", encoding="utf-8") as f:
-            f.write(line1 + "\n" + line2)
+            f.write("\n".join(out_lines))
         api_key["value"] = line1
         org_api_key["value"] = line2 if line2 else None
         global_variables.set_key(line1)
@@ -112,7 +166,7 @@ def save_api_key(key, org_key: str | None = None):
             global_variables.set_org_key(line2 if line2 else None)
         except Exception:
             pass
-        global_variables.log("Keys validated and saved successfully (player/org).")
+        global_variables.log("Keys validated and saved successfully (player/org). Config updated.")
     except Exception as e:
         global_variables.log(f"Error saving API keys: {e}")
 
@@ -143,27 +197,105 @@ def activate_key(key_entry):
 # Load Existing Key (UI-agnostic)
 @global_variables.log_exceptions
 def load_existing_key():
-    """Load player and org keys from cfg; return player key for backward compatibility.
+    """Load config (player key, org key, optional custom sounds).
 
-    Side effects: sets global_variables.set_key and set_org_key when available.
+    Returns player key for backward compatibility.
+    Lines:
+      1: player key
+      2: org key
+      3: (optional) custom interdiction sound absolute path
+    4: (optional) custom nearby/player detected sound absolute path
+    5: (optional) custom kill sound absolute path
     """
     try:
         with open("killtracker_key.cfg", "r", encoding="utf-8") as f:
             lines = f.read().splitlines()
         player = (lines[0].strip() if len(lines) >= 1 else "") or None
         org = (lines[1].strip() if len(lines) >= 2 else "") or None
+        snd_interdiction = (lines[2].strip() if len(lines) >= 3 else "") or None
+        snd_nearby = (lines[3].strip() if len(lines) >= 4 else "") or None
         api_key["value"] = player
         org_api_key["value"] = org
+        # If no explicit config values, use defaults from assets folder (do not write to file)
+        try:
+            assets_dir = _get_assets_dir()
+            if not snd_interdiction:
+                cand = os.path.join(assets_dir, "interdiction detected.wav")
+                if os.path.isfile(cand):
+                    snd_interdiction = cand
+            if not snd_nearby:
+                cand = os.path.join(assets_dir, "player detected.wav")
+                if os.path.isfile(cand):
+                    snd_nearby = cand
+            snd_kill = (lines[4].strip() if len(lines) >= 5 else "") or None
+            if not snd_kill:
+                cand = os.path.join(assets_dir, "kill.wav")
+                if os.path.isfile(cand):
+                    snd_kill = cand
+        except Exception:
+            pass
+        custom_sound_interdiction["value"] = snd_interdiction
+        custom_sound_nearby["value"] = snd_nearby
+        custom_sound_kill["value"] = snd_kill
         if player:
             global_variables.set_key(player)
         try:
             global_variables.set_org_key(org)
         except Exception:
             pass
+        # Propagate sound paths to globals
+        try:
+            global_variables.set_custom_sound_interdiction(snd_interdiction)
+            global_variables.set_custom_sound_nearby(snd_nearby)
+            global_variables.set_custom_sound_kill(snd_kill)
+        except Exception:
+            pass
         return player
     except FileNotFoundError:
         global_variables.log("No existing key found. Please enter valid keys.")
         return None
+
+def update_sound_paths(interdiction_path: str | None, nearby_path: str | None, kill_path: str | None = None):
+    """Update (or clear) custom sound paths, preserving existing keys.
+
+    Writes a 4-line config (adding empty placeholders for missing paths) for consistency.
+    """
+    # Load existing keys first
+    try:
+        with open("killtracker_key.cfg", "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except Exception:
+        lines = []
+    player = (lines[0].strip() if len(lines) >= 1 else "")
+    org = (lines[1].strip() if len(lines) >= 2 else "")
+    line3 = (interdiction_path or "").strip()
+    line4 = (nearby_path or "").strip()
+    line5 = (kill_path or "").strip()
+    # Persist
+    try:
+        with open("killtracker_key.cfg", "w", encoding="utf-8") as f:
+            f.write("\n".join([player, org, line3, line4, line5]))
+        custom_sound_interdiction["value"] = line3 or None
+        custom_sound_nearby["value"] = line4 or None
+        custom_sound_kill["value"] = line5 or None
+        try:
+            global_variables.set_custom_sound_interdiction(line3 or None)
+            global_variables.set_custom_sound_nearby(line4 or None)
+            global_variables.set_custom_sound_kill(line5 or None)
+        except Exception:
+            pass
+        global_variables.log("Custom sound paths updated in config.")
+    except Exception as e:
+        global_variables.log(f"Failed to update custom sound paths: {e}")
+
+def get_custom_sound_interdiction() -> str | None:
+    return custom_sound_interdiction.get("value")
+
+def get_custom_sound_nearby() -> str | None:
+    return custom_sound_nearby.get("value")
+
+def get_custom_sound_kill() -> str | None:
+    return custom_sound_kill.get("value")
 
 def get_org_key_value() -> str | None:
     return org_api_key.get("value")

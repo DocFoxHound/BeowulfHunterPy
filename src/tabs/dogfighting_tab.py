@@ -2,6 +2,7 @@ import tkinter as tk
 from typing import Dict, Any, List, Tuple
 import threading
 import graphs
+from tkinter import filedialog
 
 import global_variables as gv
 try:
@@ -10,6 +11,11 @@ try:
 except Exception:
     # When imported as 'tabs.dogfighting_tab'
     import ironpoint_api  # type: ignore
+try:
+    # Prefer local import path resolution for keys module
+    from .. import keys  # type: ignore
+except Exception:
+    import keys  # type: ignore
 
 # Builds the Dogfighting tab contents mirroring the Piracy tab layout.
 
@@ -587,12 +593,123 @@ def build(parent: tk.Misc) -> Dict[str, Any]:
     graphs_btn = tk.Button(btns, text="Graphs", command=_open_graphs_window, **btn_style)
     graphs_btn.pack(side=tk.TOP, fill=tk.X, padx=0, pady=(0, 6))
 
+    # --- Custom Sound Pickers ---
+    def _pick_interdiction_sound():
+        try:
+            path = filedialog.askopenfilename(
+                parent=parent,
+                title="Select sound for Interdicted",
+                filetypes=[("WAV files", "*.wav;*.wave"), ("All files", "*.*")]
+            )
+        except Exception:
+            path = None
+        if not path:
+            return
+        try:
+            keys.update_sound_paths(interdiction_path=path, nearby_path=keys.get_custom_sound_nearby())
+        except Exception:
+            try:
+                gv.log("Failed to persist custom Interdicted sound path.")
+            except Exception:
+                pass
+        try:
+            gv.set_custom_sound_interdiction(path)
+            gv.log(f"Custom Interdicted sound set: {path}")
+        except Exception:
+            pass
+
+    def _pick_nearby_sound():
+        try:
+            path = filedialog.askopenfilename(
+                parent=parent,
+                title="Select sound for Nearby",
+                filetypes=[("WAV files", "*.wav;*.wave"), ("All files", "*.*")]
+            )
+        except Exception:
+            path = None
+        if not path:
+            return
+        try:
+            keys.update_sound_paths(interdiction_path=keys.get_custom_sound_interdiction(), nearby_path=path)
+        except Exception:
+            try:
+                gv.log("Failed to persist custom Nearby sound path.")
+            except Exception:
+                pass
+        try:
+            gv.set_custom_sound_nearby(path)
+            gv.log(f"Custom Nearby sound set: {path}")
+        except Exception:
+            pass
+
+    pick_interdiction_btn = tk.Button(btns, text="Choose Snare Sound", command=_pick_interdiction_sound, **btn_style)
+    pick_interdiction_btn.pack(side=tk.TOP, fill=tk.X, padx=0, pady=(0, 6))
+    pick_nearby_btn = tk.Button(btns, text="Choose Proximity Sound", command=_pick_nearby_sound, **btn_style)
+    pick_nearby_btn.pack(side=tk.TOP, fill=tk.X, padx=0, pady=(0, 6))
+
+    # Overlay controls section
+    overlay_frame = tk.Frame(btns, bg=COLORS['bg'])
+    overlay_frame.pack(side=tk.TOP, fill=tk.X, padx=0, pady=(4, 6))
+    tk.Label(overlay_frame, text="Overlay", fg=COLORS['fg'], bg=COLORS['bg'], font=("Times New Roman", 12, "bold")).pack(anchor='w', pady=(0,4))
+
+    overlay_status_var = tk.StringVar(value='Disabled')
+    corner_var = tk.StringVar(value=gv.get_overlay_corner())
+
+    def _apply_corner():
+        try:
+            gv.set_overlay_corner(corner_var.get())
+            from overlay_window import refresh_overlay, ensure_overlay  # type: ignore
+            ensure_overlay()
+            refresh_overlay()
+        except Exception:
+            pass
+
+    def _toggle_overlay():
+        try:
+            enabled = not gv.is_overlay_enabled()
+            gv.set_overlay_enabled(enabled)
+            overlay_status_var.set('Enabled' if enabled else 'Disabled')
+            if enabled:
+                from overlay_window import ensure_overlay, refresh_overlay  # type: ignore
+                ensure_overlay(); refresh_overlay()
+            else:
+                from overlay_window import disable_overlay  # type: ignore
+                disable_overlay()
+        except Exception:
+            pass
+    toggle_btn = tk.Button(overlay_frame, text="Enable/Disable", command=_toggle_overlay, **btn_style)
+    toggle_btn.pack(fill=tk.X, pady=(0,4))
+    status_lbl = tk.Label(overlay_frame, textvariable=overlay_status_var, fg=COLORS['muted'], bg=COLORS['bg'], font=("Times New Roman", 10))
+    status_lbl.pack(anchor='w', pady=(0,6))
+
+    # Corner selection radio buttons
+    corners = [
+        ('Top-Left', 'top-left'),
+        ('Top-Right', 'top-right'),
+        ('Bottom-Left', 'bottom-left'),
+        ('Bottom-Right', 'bottom-right'),
+    ]
+    corner_box = tk.Frame(overlay_frame, bg=COLORS['bg'])
+    corner_box.pack(fill=tk.X)
+    for label, val in corners:
+        rb = tk.Radiobutton(corner_box, text=label, value=val, variable=corner_var,
+                            command=_apply_corner, bg=COLORS['bg'], fg=COLORS['fg'], selectcolor='#222222',
+                            activebackground=COLORS['bg'], activeforeground=COLORS['fg'], highlightthickness=0)
+        rb.pack(anchor='w')
+
+    # Expose refs
+    refs['overlay_toggle_button'] = toggle_btn
+    refs['overlay_status_var'] = overlay_status_var
+    refs['overlay_corner_var'] = corner_var
+
     refs.update({
         'refresh_button': refresh_btn,
         'clear_button': clear_btn,
         'graphs_button': graphs_btn,
         'open_graphs_window': _open_graphs_window,
         'graphs_window_ref': graphs_window_ref,
+        'pick_interdiction_sound_button': pick_interdiction_btn,
+        'pick_nearby_sound_button': pick_nearby_btn,
     })
 
     # Seed with example data so the UI looks alive on first open

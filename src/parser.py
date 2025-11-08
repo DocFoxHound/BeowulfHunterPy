@@ -1,25 +1,43 @@
 import os
+import sys
 import json
 import requests
 import threading
 import time
 import re
+import queue
 import global_variables
+# Support both running with 'src' on sys.path (top-level import) and package imports
+try:
+    from rsi_profile_scraper import scrape_profile_images  # when 'src' is on sys.path
+except ImportError:  # pragma: no cover - fallback for package context
+    from .rsi_profile_scraper import scrape_profile_images
 from datetime import datetime, timezone, timedelta
-
+try:
+    import winsound  # Windows only; for event sounds
+except Exception:
+    winsound = None
 local_version = "7.0"
 api_key = {"value": None}
-# Star Citizen public API key for org/profile lookups (provided by user)
-ORG_API_KEY = ""
-# Simple in-memory cache: handle(lower) -> { 'org_sid': str|None, 'org_picture': str|None, 'victim_image': str|None }
-org_info_cache = {}
-# Optional small on-disk cache to reduce repeated API calls across runs
-ORG_CACHE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'org_cache.json')
-_org_cache_loaded = False
-_org_disk_cache = {}
 # Cache of kills fetched from the API for the current run. Stored as set of
 # (victim, timestamp) tuples for fast duplicate checks by other functions.
 api_kills_cache = set()
+
+# Debounce tracking for proximity events
+_actor_stall_last_times = {}      # player -> last posted epoch (actor stall)
+_fake_hit_last_times = {}         # player -> last posted epoch (fake hit)
+_pending_actor_stall = {}         # player -> after_id (scheduled actor stall after fake hit pin)
+DEBOUNCE_SECONDS = 10.0
+
+# Sound throttling for proximity events (do not spam)
+THROTTLE_SECONDS = 3.0
+_last_sound_times = {
+    'fake_hit': 0.0,
+    'actor_stall': 0.0,
+}
+# Manage a single pending Actor Stall sound so it can play after an Interdiction if close
+_pending_actor_stall_sound_job = None
+_pending_actor_stall_sound_time = 0.0
 
 # Holds the most recent vehicle destruction context attributed to the local player,
 # so we can attach accurate location/coordinates to the next kill event.
@@ -31,194 +49,147 @@ last_vehicle_context = {
 }
 
 
-@global_variables.log_exceptions
-def get_org_info_for_handle(handle):
-    """Return org info dict for a given RSI handle.
+## Kill processing queue and worker (1 req/sec scraping; no org cache)
+kill_processing_queue = queue.Queue()
+_kill_worker_started = False
+_last_scrape_ts = 0.0
 
-    Returns a dict: { 'org_sid': Optional[str], 'org_picture': Optional[str], 'victim_image': Optional[str] }.
-    Uses a small in-memory cache to avoid repeated network requests.
-    """
+
+def _update_processing_ui():
     try:
-        if not handle:
-            return {"org_sid": None, "org_picture": None, "victim_image": None}
-        h = str(handle).strip()
-        if not h:
-            return {"org_sid": None, "org_picture": None, "victim_image": None}
-        key = h.lower()
-        # Load disk cache once per run
-        global _org_cache_loaded, _org_disk_cache
-        try:
-            if not _org_cache_loaded and os.path.isfile(ORG_CACHE_PATH):
-                try:
-                    with open(ORG_CACHE_PATH, 'r', encoding='utf-8', errors='ignore') as fh:
-                        _org_disk_cache = json.load(fh) or {}
-                except Exception:
-                    _org_disk_cache = {}
-                _org_cache_loaded = True
-        except Exception:
-            pass
+        app = global_variables.get_app()
+        refs = global_variables.get_main_tab_refs()
+        updater = refs.get('update_processing_label')
+        if app is not None and callable(updater):
+            app.after(0, updater)
+        elif callable(updater):
+            updater()
+    except Exception:
+        pass
 
-        # Cached?
-        try:
-            if key in org_info_cache:
-                return org_info_cache[key]
-            # Check disk cache as a fallback
-            if key in _org_disk_cache:
-                try:
-                    cached = _org_disk_cache.get(key) or {}
-                    # normalize keys
-                    res = {
-                        'org_sid': cached.get('org_sid'),
-                        'org_picture': cached.get('org_picture'),
-                        'victim_image': cached.get('victim_image')
-                    }
-                    org_info_cache[key] = res
-                    return res
-                except Exception:
-                    pass
-        except Exception:
-            pass
+def _ensure_kill_worker():
+    global _kill_worker_started
+    if _kill_worker_started:
+        return
 
-        # Ensure API key is loaded from cfg if not set
-        def _get_org_api_key():
-            global ORG_API_KEY
+    def _worker():
+        global _last_scrape_ts
+        while True:
+            item = kill_processing_queue.get()
             try:
-                if ORG_API_KEY:
-                    return ORG_API_KEY
-                # cfg is at project root: one directory up from this file
-                root = os.path.dirname(os.path.dirname(__file__))
-                cfg_path = os.path.join(root, 'killtracker_key.cfg')
-                key_val = None
-                try:
-                    with open(cfg_path, 'r', encoding='utf-8', errors='ignore') as fh:
-                        lines = fh.readlines()
-                        if len(lines) >= 2:
-                            key_val = lines[1].strip()
-                except Exception:
-                    key_val = None
-                if key_val:
-                    ORG_API_KEY = key_val
-                    return ORG_API_KEY
-            except Exception:
-                pass
-            return ORG_API_KEY
-
-        api_key_val = _get_org_api_key()
-        if not api_key_val:
-            # Can't query without API key; return best-effort from disk cache if present
-            try:
-                if key in _org_disk_cache:
-                    cached = _org_disk_cache.get(key) or {}
-                    return {
-                        'org_sid': cached.get('org_sid'),
-                        'org_picture': cached.get('org_picture'),
-                        'victim_image': cached.get('victim_image')
-                    }
-            except Exception:
-                pass
-            return {"org_sid": None, "org_picture": None, "victim_image": None}
-
-        # Build request
-        url = f"https://api.starcitizen-api.com/{api_key_val}/v1/cache/user/{h}"
-        sid = None
-        image = None  # organization image
-        profile_image = None  # player's profile avatar
-        # Light retry for transient errors during bulk parsing
-        attempts = 2
-        live_attempted = False
-        for attempt in range(attempts):
-            resp = None
-            try:
-                resp = requests.get(url, timeout=10)
-            except Exception:
-                resp = None
-            if resp is not None and resp.status_code == 200:
-                try:
-                    data = resp.json()
-                except Exception:
-                    data = None
-                # If cache method returns a hint to use live, try live once
-                try:
-                    needs_live = False
-                    if isinstance(data, dict):
-                        if (data.get('success') in (0, '0', False)) or (data.get('data') is None):
-                            msg = str(data.get('message') or '').lower()
-                            if ('live' in msg) or ('data was null' in msg) or ('use the `live` method' in msg):
-                                needs_live = True
-                    if needs_live and not live_attempted:
-                        live_attempted = True
-                        live_url = url.replace('/cache/', '/live/')
-                        try:
-                            live_resp = requests.get(live_url, timeout=10)
-                            if live_resp.status_code == 200:
-                                try:
-                                    data = live_resp.json()
-                                except Exception:
-                                    data = None
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-                # Prefer primary organization info; fallback to first affiliation
-                org = None
-                try:
-                    if isinstance(data, dict):
-                        d = data.get('data') or {}
-                        if isinstance(d, dict):
-                            org = d.get('organization')
-                            if not org:
-                                aff = d.get('affiliation')
-                                if isinstance(aff, list) and aff:
-                                    org = aff[0]
-                            # Extract player's profile image if present
-                            try:
-                                prof = d.get('profile')
-                                if isinstance(prof, dict):
-                                    profile_image = prof.get('image')
-                            except Exception:
-                                profile_image = None
-                except Exception:
-                    org = None
-                if isinstance(org, dict):
+                victim = item.get('victim')
+                # Enforce 1 req/sec before scraping
+                now = time.time()
+                delta = now - _last_scrape_ts
+                if delta < 1.0:
                     try:
-                        sid = org.get('sid')
-                    except Exception:
-                        sid = None
-                    try:
-                        image = org.get('image')
-                    except Exception:
-                        image = None
-                break
-            else:
-                if resp is not None and resp.status_code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
-                    try:
-                        time.sleep(0.5)
+                        time.sleep(1.0 - delta)
                     except Exception:
                         pass
-                    continue
-                else:
-                    break
-        # Network or parse failure; just leave None values
-        sid = sid or None
-        image = image or None
-        profile_image = profile_image or None
+                _last_scrape_ts = time.time()
 
-        result = {"org_sid": sid, "org_picture": image, "victim_image": profile_image}
-        try:
-            org_info_cache[key] = result
-        except Exception:
-            pass
-        # Persist to disk cache if we have useful data
-        try:
-            if any(result.get(k) for k in ('org_sid', 'org_picture', 'victim_image')):
-                _org_disk_cache[key] = result
-                with open(ORG_CACHE_PATH, 'w', encoding='utf-8') as fh:
-                    json.dump(_org_disk_cache, fh, ensure_ascii=False)
-        except Exception:
-            pass
-        return result
+                # Scrape images (no cache). Proceed even on failure.
+                try:
+                    org_picture, victim_image = scrape_profile_images(victim)
+                except Exception:
+                    org_picture, victim_image = (None, None)
+
+                # Build final json, publish, and update UI lists
+                json_data = dict(item.get('json_data') or {})
+                json_data['org_sid'] = None
+                json_data['org_picture'] = org_picture
+                json_data['victim_image'] = victim_image
+
+                try:
+                    publish_kill(json_data, suppress_logs=False)
+                except Exception:
+                    pass
+                # Refresh overlay after new kill
+                try:
+                    # Mark recent for overlay fade (10s)
+                    existing = list(global_variables.get_api_kills_all() or [])
+                    stamp = time.time()
+                    for it in existing[-3:]:
+                        try:
+                            it['_overlay_added'] = stamp
+                        except Exception:
+                            pass
+                    global_variables.set_api_kills_all(existing)
+                except Exception:
+                    pass
+                _refresh_overlay_safe()
+
+                # Create API-like record and append to combined list
+                dt = (str(json_data.get('damage_type') or '')).lower()
+                fps_markers = ('bullet', 'melee', 'explosion', 'grenade', 'bleed', 'laser', 'railgun')
+                is_fps = any(m in dt for m in fps_markers) and ((json_data.get('killers_ship') or 'N/A') == 'N/A')
+                api_like = {
+                    'id': None,
+                    'user_id': None,
+                    'ship_used': json_data.get('killers_ship') if (json_data.get('killers_ship') and json_data.get('killers_ship') != 'N/A') else None,
+                    'ship_killed': 'FPS' if is_fps else None,
+                    'value': 0,
+                    'kill_count': 1,
+                    'victims': [victim] if victim else [],
+                    'patch': None,
+                    'game_mode': json_data.get('game_mode'),
+                    'timestamp': json_data.get('time'),
+                    # Include both zone and location to help classification heuristics
+                    'zone': json_data.get('zone'),
+                    'location': json_data.get('location'),
+                    'coordinates': json_data.get('coordinates'),
+                    'org_sid': None,
+                    'org_picture': org_picture,
+                    'victim_image': victim_image,
+                }
+                try:
+                    existing = []
+                    try:
+                        existing = list(global_variables.get_api_kills_all() or [])
+                    except Exception:
+                        existing = []
+                    existing.append(api_like)
+                    global_variables.set_api_kills_all(existing)
+                except Exception:
+                    pass
+
+                # Refresh UI columns
+                try:
+                    app = global_variables.get_app()
+                    refs = global_variables.get_main_tab_refs()
+                    refresh = refs.get('refresh_kill_columns')
+                    if app is not None and callable(refresh):
+                        app.after(0, refresh)
+                    elif callable(refresh):
+                        refresh()
+                except Exception:
+                    pass
+            finally:
+                try:
+                    global_variables.dec_kill_processing_count(1)
+                except Exception:
+                    pass
+                _update_processing_ui()
+                try:
+                    kill_processing_queue.task_done()
+                except Exception:
+                    pass
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    _kill_worker_started = True
+
+# Overlay refresh helpers
+def _refresh_overlay_safe():
+    try:
+        from overlay_window import refresh_overlay  # type: ignore
     except Exception:
-        return {"org_sid": None, "org_picture": None, "victim_image": None}
+        refresh_overlay = None
+    try:
+        if refresh_overlay:
+            refresh_overlay()
+    except Exception:
+        pass
 
 
 @global_variables.log_exceptions
@@ -945,8 +916,8 @@ def parse_backup_logs(backup_dir, rsi_name, user_id=None, progress_callback=None
                                             # non-duplicate: attempt to publish like parse_kill_line would
                                             try:
                                                 # send_kill_to_api expects the JSON-shaped data similar to parse_kill_line
-                                                victim_handle = parsed.get('victim')
-                                                v_org = get_org_info_for_handle(victim_handle)
+                                                # No org/profile lookup for backup uploads (keep lightweight)
+                                                v_org = {"org_sid": None, "org_picture": None, "victim_image": None}
                                                 json_data = {
                                                     'player': rsi_name,
                                                     'victim': parsed.get('victim'),
@@ -1090,8 +1061,7 @@ def parse_kill_line(line, target_name):
 
     event_message = f"You have killed {killed},"
     global_variables.log(event_message)
-    # Fetch org info for the victim
-    org_info = get_org_info_for_handle(killed)
+    # Org/profile images will be scraped asynchronously; skip here
     json_data = {
         'player': target_name,
         'victim': killed,
@@ -1105,70 +1075,21 @@ def parse_kill_line(line, target_name):
         'client_ver': "7.0",
         'killers_ship': global_active_ship,
         'damage_type': damage_type,
-        'org_sid': org_info.get('org_sid'),
-        'org_picture': org_info.get('org_picture'),
-        'victim_image': org_info.get('victim_image')
     }
-
-    # First, append to the combined in-memory list (API-like schema)
-    # so the UI refresh includes this live kill immediately.
+    # Queue for processing (scrape then publish and display)
     try:
-        existing = []
+        _ensure_kill_worker()
+        kill_processing_queue.put({'victim': killed, 'json_data': json_data})
         try:
-            existing = list(global_variables.get_api_kills_all())
+            global_variables.inc_kill_processing_count(1)
         except Exception:
-            existing = []
-        # Map live kill into the API-like schema
-        # Note: id and user_id may be unknown locally; leave as None.
-        # Derive ship_killed as 'FPS' if weapon/damage suggests FPS, else None to imply ship-based.
-        dt = (damage_type or '').lower()
-        fps_markers = ('bullet', 'melee', 'explosion', 'grenade', 'bleed', 'laser', 'railgun')
-        is_fps = any(m in dt for m in fps_markers) and (not (global_active_ship or '').strip() or (global_active_ship or '').strip().upper() == 'N/A')
-        api_like = {
-            'id': None,
-            'user_id': None,
-            'ship_used': global_active_ship if global_active_ship and global_active_ship != 'N/A' else None,
-            'ship_killed': 'FPS' if is_fps else None,
-            'value': 0,
-            'kill_count': 1,
-            'victims': [killed] if killed else [],
-            'patch': None,
-            'game_mode': global_game_mode,
-            'timestamp': kill_time,
-            # Optional extras consumed by Details view
-            'location': last_vehicle_context.get('zone'),
-            'coordinates': last_vehicle_context.get('coordinates'),
-            'org_sid': org_info.get('org_sid'),
-            'org_picture': org_info.get('org_picture'),
-            'victim_image': org_info.get('victim_image'),
-        }
-        existing.append(api_like)
-        global_variables.set_api_kills_all(existing)
-    except Exception:
-        pass
-
-    # After recording to combined list, refresh UI lists from all_kills to avoid duplicates
-    try:
-        app = global_variables.get_app()
-        refs = global_variables.get_main_tab_refs()
-        refresh = refs.get('refresh_kill_columns')
-        if app is not None and callable(refresh):
-            try:
-                app.after(0, refresh)
-            except Exception:
-                refresh()
-        elif callable(refresh):
-            refresh()
-    except Exception:
-        pass
-
-    # Publish to API (network)
-    try:
-        publish_kill(json_data, suppress_logs=False)
+            pass
+        try:
+            _update_processing_ui()
+        except Exception:
+            pass
     except Exception as e:
-        global_variables.log(f"Error sending kill event: {e}")
-
-    # (Already appended above)
+        global_variables.log(f"Failed to enqueue kill for processing: {e}")
 
 
 @global_variables.log_exceptions
@@ -1193,7 +1114,9 @@ def parse_kill_local(line, target_name, suppress_logs=False):
             global_variables.log(event_message)
 
         # Also present a compact JSON-like summary for debugging/inspection
-        org_info = get_org_info_for_handle(killed)
+        # NOTE: During backup parsing we intentionally DO NOT fetch org/profile images
+        # to avoid overloading the queue and remote site.
+        org_info = {"org_sid": None, "org_picture": None, "victim_image": None}
         json_data = {
             'player': target_name,
             'victim': killed,
@@ -1277,6 +1200,12 @@ def publish_kill(json_data, suppress_logs=False, return_error=False):
         if response.status_code in (200, 201):
             if not suppress_logs:
                 global_variables.log("Kill logged.")
+            # Play kill sound if enabled
+            try:
+                if global_variables.get_play_kill_sound():
+                    _play_kill_sound()
+            except Exception:
+                pass
             if return_error:
                 return (True, None)
             return True
@@ -1387,6 +1316,322 @@ def read_log_line(line, rsi_name, upload_kills):
             -1 != line.find("<local client>: Entering control state dead"))) and (
             -1 != line.find(global_active_ship_id)):
         destroy_player_zone(line)
+    # Proximity events
+    try:
+        if "<Actor stall>" in line and "Actor stall detected" in line:
+            parse_actor_stall_event(line)
+        elif "Fake hit" in line and "[OnHandleHit]" in line:
+            parse_fake_hit_event(line)
+    except Exception:
+        pass
+
+
+def _extract_timestamp(line: str) -> str:
+    try:
+        m = re.search(r"^<([^>]+)>", line)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+def _play_proximity_sound(kind: str):
+    """Play sound for proximity events. Filenames expected in assets/.
+    kind: 'fake_hit' or 'actor_stall'"""
+    try:
+        # 1. Custom override from config (global_variables)
+        override = None
+        try:
+            if kind == 'fake_hit':
+                override = global_variables.get_custom_sound_interdiction()
+            elif kind == 'actor_stall':
+                override = global_variables.get_custom_sound_nearby()
+        except Exception:
+            override = None
+        if override and os.path.isfile(override):
+            if winsound:
+                try:
+                    winsound.PlaySound(override, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                except Exception:
+                    pass
+            return
+        # 2. Fallback to bundled filenames within an 'assets' folder only
+        if kind == 'fake_hit':
+            candidates = ("interdiction detected.wav", "interdiction detected.wave")
+        elif kind == 'actor_stall':
+            candidates = ("player detected.wav", "player detected.wave")
+        else:
+            candidates = tuple()
+
+        path = None
+        # Determine assets folder depending on PyInstaller or source run
+        try:
+            root = getattr(sys, '_MEIPASS', None) or os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
+        except Exception:
+            root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
+        assets_dir = os.path.join(root, 'assets')
+        for cand in candidates:
+            test_path = os.path.join(assets_dir, cand)
+            if os.path.isfile(test_path):
+                path = test_path
+                break
+        if not path:
+            return
+        if winsound:
+            try:
+                winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def _request_proximity_sound(kind: str):
+    """Throttle and order proximity sounds so they don't spam.
+
+    Rules:
+    - Each type plays at most once per 3 seconds.
+    - If both happen close (<3s), ensure Interdicted plays first, then Nearby after 3s.
+    - Actor Stall sounds within the window are coalesced into a single pending play after Interdicted.
+    """
+    global _pending_actor_stall_sound_job, _pending_actor_stall_sound_time
+    try:
+        # Gate by user toggles
+        if kind == 'fake_hit' and not global_variables.get_play_snare_sound():
+            return
+        if kind == 'actor_stall' and not global_variables.get_play_proximity_sound():
+            return
+        now = time.time()
+        app = global_variables.get_app()
+
+        def _play_now(k: str):
+            try:
+                _last_sound_times[k] = time.time()
+            except Exception:
+                pass
+            try:
+                _play_proximity_sound(k)
+            except Exception:
+                pass
+
+        if kind == 'fake_hit':
+            last = _last_sound_times.get('fake_hit', 0.0)
+            if now - last >= THROTTLE_SECONDS:
+                # Play now
+                _play_now('fake_hit')
+                # Ensure any pending actor stall sound occurs after this fake_hit window
+                try:
+                    if _pending_actor_stall_sound_job is not None:
+                        # push it out if scheduled earlier than new boundary
+                        boundary = _last_sound_times.get('fake_hit', now) + THROTTLE_SECONDS
+                        if _pending_actor_stall_sound_time < boundary:
+                            try:
+                                app.after_cancel(_pending_actor_stall_sound_job)
+                            except Exception:
+                                pass
+                            delay_ms = max(0, int((boundary - time.time()) * 1000))
+                            def _do_play_stall():
+                                # Clear pending state then play stall sound
+                                try:
+                                    globals()['_pending_actor_stall_sound_job'] = None
+                                    globals()['_pending_actor_stall_sound_time'] = 0.0
+                                except Exception:
+                                    pass
+                                _play_now('actor_stall')
+                            try:
+                                _pending_actor_stall_sound_job = app.after(delay_ms, _do_play_stall)
+                                _pending_actor_stall_sound_time = time.time() + (delay_ms / 1000.0)
+                            except Exception:
+                                # As a fallback, play immediately if scheduling fails
+                                _pending_actor_stall_sound_job = None
+                                _pending_actor_stall_sound_time = 0.0
+                                _play_now('actor_stall')
+                except Exception:
+                    pass
+            # else: throttled, do nothing (no queue for fake_hit)
+            return
+
+        if kind == 'actor_stall':
+            last_stall = _last_sound_times.get('actor_stall', 0.0)
+            last_fake = _last_sound_times.get('fake_hit', 0.0)
+            # If stall sound recently played, do nothing
+            if now - last_stall < THROTTLE_SECONDS:
+                return
+            # If a fake hit sound occurred within 3s, schedule a single stall sound for after that window
+            if now - last_fake < THROTTLE_SECONDS:
+                boundary = last_fake + THROTTLE_SECONDS
+                # If we already have a pending job, only push it out if earlier than boundary
+                if _pending_actor_stall_sound_job is not None:
+                    if _pending_actor_stall_sound_time < boundary:
+                        try:
+                            app.after_cancel(_pending_actor_stall_sound_job)
+                        except Exception:
+                            pass
+                        _pending_actor_stall_sound_job = None
+                        _pending_actor_stall_sound_time = 0.0
+                    else:
+                        return  # already scheduled later; nothing to do
+                delay_ms = max(0, int((boundary - now) * 1000))
+                def _do_play():
+                    try:
+                        globals()['_pending_actor_stall_sound_job'] = None
+                        globals()['_pending_actor_stall_sound_time'] = 0.0
+                    except Exception:
+                        pass
+                    _play_now('actor_stall')
+                try:
+                    _pending_actor_stall_sound_job = app.after(delay_ms, _do_play)
+                    _pending_actor_stall_sound_time = now + (delay_ms / 1000.0)
+                except Exception:
+                    # Fallback: play immediately if scheduling fails
+                    _pending_actor_stall_sound_job = None
+                    _pending_actor_stall_sound_time = 0.0
+                    _play_now('actor_stall')
+                return
+            # Otherwise, allowed to play now
+            _play_now('actor_stall')
+            return
+    except Exception:
+        # As last resort just try to play
+        try:
+            _play_proximity_sound(kind)
+        except Exception:
+            pass
+
+def _play_kill_sound():
+    """Play kill sound using custom path or default assets/kill.wav."""
+    try:
+        override = None
+        try:
+            override = global_variables.get_custom_sound_kill()
+        except Exception:
+            override = None
+        if override and os.path.isfile(override):
+            if winsound:
+                try:
+                    winsound.PlaySound(override, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                except Exception:
+                    pass
+            return
+        # Fallback to assets/kill.wav
+        try:
+            root = getattr(sys, '_MEIPASS', None) or os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
+        except Exception:
+            root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
+        assets_dir = os.path.join(root, 'assets')
+        path = os.path.join(assets_dir, 'kill.wav')
+        if os.path.isfile(path) and winsound:
+            try:
+                winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+@global_variables.log_exceptions
+def parse_actor_stall_event(line: str):
+    ts = _extract_timestamp(line)
+    player = None
+    try:
+        m = re.search(r"Player:\s*([^,]+)", line)
+        if m:
+            player = m.group(1).strip()
+    except Exception:
+        player = None
+    if not player:
+        return
+    now = time.time()
+    # Debounce duplicate actor stalls for player
+    try:
+        last = _actor_stall_last_times.get(player)
+        if last and (now - last) < DEBOUNCE_SECONDS:
+            return
+    except Exception:
+        pass
+    # Post immediately; sound system will sequence if recent fake-hit occurred
+    try:
+        global_variables.add_actor_stall_event({'timestamp': ts, 'player': player})
+        _actor_stall_last_times[player] = now
+        _request_proximity_sound('actor_stall')
+        _update_player_events_ui()
+        _refresh_overlay_safe()
+    except Exception:
+        pass
+
+
+@global_variables.log_exceptions
+def parse_fake_hit_event(line: str):
+    ts = _extract_timestamp(line)
+    player = None  # target/victim handle from 'child'
+    from_player = None  # interdictor handle from 'FROM'
+    ship_raw = None
+    try:
+        m_player = re.search(r"child\s+([A-Za-z0-9_]+)", line)
+        if m_player:
+            player = m_player.group(1).strip()
+    except Exception:
+        player = None
+    try:
+        m_from = re.search(r"FROM\s+([A-Za-z0-9_]+)", line)
+        if m_from:
+            from_player = m_from.group(1).strip()
+    except Exception:
+        from_player = None
+    try:
+        m_ship = re.search(r"TO\s+([A-Za-z0-9_]+)\.", line)
+        if m_ship:
+            ship_raw = m_ship.group(1).strip()
+    except Exception:
+        ship_raw = None
+    ship_clean = None
+    if ship_raw:
+        try:
+            ship_clean = re.sub(r"_[0-9]+$", "", ship_raw)
+        except Exception:
+            ship_clean = ship_raw
+    if not (player or from_player):
+        return
+    now = time.time()
+    # Debounce duplicate fake hits
+    try:
+        keyname = from_player or player
+        last = _fake_hit_last_times.get(keyname)
+        if last and (now - last) < DEBOUNCE_SECONDS:
+            return
+    except Exception:
+        pass
+    expires_at = now + 10.0  # pinned duration
+    global_variables.add_fake_hit_event({'timestamp': ts, 'player': player, 'from_player': from_player, 'target_player': player, 'ship': ship_clean, 'expires_at': expires_at})
+    try:
+        _fake_hit_last_times[keyname] = now
+    except Exception:
+        pass
+    _request_proximity_sound('fake_hit')
+    _update_player_events_ui()
+    _refresh_overlay_safe()
+
+
+def _update_player_events_ui():
+    """Schedule UI update for player events area if available."""
+    try:
+        # Prefer Proximity tab refs when available; fallback to Main tab
+        refs = {}
+        try:
+            refs = global_variables.get_proximity_tab_refs() or {}
+        except Exception:
+            refs = {}
+        if not refs:
+            refs = global_variables.get_main_tab_refs()
+        app = global_variables.get_app()
+        refresh = refs.get('refresh_player_events')
+        if callable(refresh):
+            if app is not None:
+                try:
+                    app.after(0, refresh)
+                    return
+                except Exception:
+                    pass
+            refresh()
+    except Exception:
+        pass
 
 
 @global_variables.log_exceptions
