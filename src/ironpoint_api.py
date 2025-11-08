@@ -24,6 +24,10 @@ _FILTERED_USER_ID_TO_NAME: Dict[str, str] = {}
 _ALL_USERS_FETCHED: bool = False
 _SUMMARY_CACHE: Dict[tuple, tuple] = {}
 _LATEST_HITS_CACHE: Dict[str, tuple] = {}
+_RECENT_FLEETS_CACHE: Dict[str, tuple] = {}
+_ALL_USERS_OPTIONS_CACHE: Dict[str, tuple] = {}
+_COMMODITY_NAMES_CACHE: Dict[str, tuple] = {}
+_COMMODITIES_FULL_CACHE: Dict[str, tuple] = {}
 
 
 def _get_json(url: str, timeout: float = 8.0) -> Any:
@@ -31,6 +35,15 @@ def _get_json(url: str, timeout: float = 8.0) -> Any:
     resp = requests.get(url, headers=headers, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
+
+
+def _post_json(url: str, payload: Dict[str, Any], timeout: float = 10.0) -> requests.Response:
+    """POST JSON with a consistent User-Agent header.
+
+    Raises requests.RequestException on errors so callers can handle/log.
+    """
+    headers = {"User-Agent": USER_AGENT, "Content-Type": "application/json"}
+    return requests.post(url, json=payload, headers=headers, timeout=timeout)
 
 
 def _extract_display_name_from_user_obj(user: Dict[str, Any]) -> str:
@@ -470,3 +483,190 @@ def get_latest_pirate_hits(timeout: float = 8.0) -> List[Dict[str, Any]]:
     except Exception:
         # On failure, return empty list and do not raise (UI-friendly)
         return []
+
+
+# --- Additional helpers for UI forms ---
+def get_recent_fleets(limit: int = 50, timeout: float = 8.0) -> List[Dict[str, Any]]:
+    """Return recent fleets (gangs) from the API, cached briefly.
+
+    Uses a short TTL (30s) to avoid excessive network calls when the form opens repeatedly.
+    """
+    now = time.time()
+    cache_key = f"recentfleets/{limit}"
+    try:
+        cached = _RECENT_FLEETS_CACHE.get(cache_key)
+        if cached and (now - cached[0] < 30):
+            return cached[1]  # type: ignore[index]
+    except Exception:
+        pass
+
+    url = f"{BASE_URL}/recentfleets/"
+    try:
+        data = _get_json(url, timeout=timeout)
+        rows: List[Dict[str, Any]] = []
+        if isinstance(data, list):
+            rows = data
+        # Sort by timestamp desc if present
+        try:
+            def _ts(v):
+                try:
+                    s = str((v or {}).get("timestamp") or (v or {}).get("created_at") or "")
+                    # Best effort: ISO8601 to epoch
+                    return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    return 0.0
+            rows.sort(key=_ts, reverse=True)
+        except Exception:
+            pass
+        if isinstance(limit, int) and limit > 0:
+            rows = rows[:limit]
+        _RECENT_FLEETS_CACHE[cache_key] = (now, rows)
+        return rows
+    except Exception:
+        return []
+
+
+def get_all_user_display_options(timeout: float = 10.0) -> List[Dict[str, str]]:
+    """Return simplified user options for selection: [{id, name}].
+
+    Name preference: nickname, rsi_display_name, rsi_handle, username; id fallback.
+    Cached with a TTL of 5 minutes.
+    """
+    now = time.time()
+    cache_key = "users/options"
+    try:
+        cached = _ALL_USERS_OPTIONS_CACHE.get(cache_key)
+        if cached and (now - cached[0] < 300):
+            return cached[1]  # type: ignore[index]
+    except Exception:
+        pass
+
+    url = f"{BASE_URL}/users/"
+    try:
+        data = _get_json(url, timeout=timeout)
+        out: List[Dict[str, str]] = []
+        if isinstance(data, list):
+            for user in data:
+                try:
+                    uid = str((user or {}).get("id") or "").strip()
+                    if not uid:
+                        continue
+                    name = _extract_display_name_from_user_obj(user)
+                    if not name or name == "Unknown":
+                        name = uid
+                    out.append({"id": uid, "name": name})
+                except Exception:
+                    continue
+        # Sort case-insensitively by name
+        try:
+            out.sort(key=lambda x: x.get("name", "").lower())
+        except Exception:
+            pass
+        _ALL_USERS_OPTIONS_CACHE[cache_key] = (now, out)
+        return out
+    except Exception:
+        return []
+
+
+def get_commodity_names(timeout: float = 10.0) -> List[str]:
+    """Return list of commodity names from summarizedcommodities endpoint.
+
+    Cached with a TTL of 10 minutes.
+    """
+    now = time.time()
+    cache_key = "uex/summarizedcommodities/names"
+    try:
+        cached = _COMMODITY_NAMES_CACHE.get(cache_key)
+        if cached and (now - cached[0] < 600):
+            return cached[1]  # type: ignore[index]
+    except Exception:
+        pass
+
+    url = f"{BASE_URL}/uex/summarizedcommodities/"
+    try:
+        data = _get_json(url, timeout=timeout)
+        names: List[str] = []
+        if isinstance(data, list):
+            for item in data:
+                try:
+                    nm = str((item or {}).get("commodity_name") or "").strip()
+                    if nm:
+                        names.append(nm)
+                except Exception:
+                    continue
+        # Unique and sorted
+        try:
+            names = sorted(sorted(set(names)), key=lambda s: s.lower())
+        except Exception:
+            pass
+        _COMMODITY_NAMES_CACHE[cache_key] = (now, names)
+        return names
+    except Exception:
+        return []
+
+
+def get_commodities_full(timeout: float = 10.0) -> List[Dict[str, Any]]:
+    """Return full commodity objects from summarizedcommodities endpoint.
+
+    Cached with a TTL of 10 minutes. Includes price_buy_avg and price_sell_avg.
+    """
+    now = time.time()
+    cache_key = "uex/summarizedcommodities/full"
+    try:
+        cached = _COMMODITIES_FULL_CACHE.get(cache_key)
+        if cached and (now - cached[0] < 600):
+            return cached[1]  # type: ignore[index]
+    except Exception:
+        pass
+
+    url = f"{BASE_URL}/uex/summarizedcommodities/"
+    try:
+        data = _get_json(url, timeout=timeout)
+        rows: List[Dict[str, Any]] = []
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    rows.append(item)
+        _COMMODITIES_FULL_CACHE[cache_key] = (now, rows)
+        return rows
+    except Exception:
+        return []
+
+
+# --- Submit a Pirate Hit (Add New form) ---
+def post_hittracker(payload: Dict[str, Any], timeout: float = 12.0,
+                    return_error: bool = False):
+    """Submit a hit payload to the hittracker endpoint.
+
+    Args:
+        payload: Dict matching hit schema required by backend.
+        timeout: Request timeout in seconds.
+        return_error: When True, returns tuple (success: bool, info: Optional[dict]).
+
+    Returns:
+        If return_error is False (default): True on HTTP 200/201 else False.
+        If return_error is True: (success, info). On failure, info contains
+        status/message/response fields when available.
+    """
+    url = f"{BASE_URL}/hittracker/"
+    try:
+        resp = _post_json(url, payload, timeout=timeout)
+        if resp.status_code in (200, 201):
+            return (True, None) if return_error else True
+        info = {
+            "status": resp.status_code,
+            "message": "Non-success status",
+            "response": None,
+        }
+        try:
+            txt = resp.text
+            if txt and len(txt) > 2000:
+                txt = txt[:2000] + "..."
+            info["response"] = txt
+        except Exception:
+            pass
+        return (False, info) if return_error else False
+    except requests.RequestException as e:
+        if return_error:
+            return (False, {"status": None, "message": "RequestException", "exception": str(e)})
+        return False
