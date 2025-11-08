@@ -79,16 +79,32 @@ all_kills = []
 last_failed_uploads = []
 kill_processing_count = 0
 
-# --- Player event tracking (Actor Stall + Fake Hit/Interdiction) ---
-# Stored as simple dict records so UI can render without reparsing.
-# actor_stall_events: list of { 'timestamp': str, 'player': str }
-# fake_hit_events: list of { 'timestamp': str, 'player': str, 'ship': Optional[str], 'expires_at': float }
-actor_stall_events = []
-fake_hit_events = []
+"""Player proximity-related event tracking.
+
+We keep both the raw typed lists (actor stall & fake hit for legacy callers) and
+an aggregated `proximity_reports` list consumed by the Proximity tab for card
+rendering. The aggregated list stores newest events at the end and is trimmed
+to `PROXIMITY_REPORTS_MAX` so the UI only ever displays a bounded recent history.
+
+Schema for aggregated proximity_reports entries:
+{
+    'kind': 'actor_stall' | 'fake_hit' | 'kill',
+    'player': str,          # primary player (victim for kill, nearby/interdicted player for others)
+    'from_player': Optional[str],  # initiator for fake_hit (snare)
+    'ship': Optional[str],  # ship context (fake_hit or kill ship_used)
+    'timestamp': str | None, # ISO timestamp if available
+    'overlay_added': float, # epoch seconds when added (used for overlay & pruning)
+}
+"""
+actor_stall_events = []  # legacy list (trimmed separately)
+fake_hit_events = []     # legacy list (trimmed separately)
+proximity_reports = []   # unified list for UI
 
 # Limits
 ACTOR_STALL_MAX = 100
-FAKE_HIT_MAX = 10  # keep a small history; UI will pin newest for 10s
+FAKE_HIT_MAX = 10  # legacy retention for fake hits (snare pinning behavior)
+PROXIMITY_REPORTS_MAX = 100
+PROXIMITY_DEDUP_SECONDS = 5.0  # ignore same kind/player repeats inside this window
 
 def set_rsi_handle(handle):
     global rsi_handle
@@ -514,18 +530,24 @@ def dec_kill_processing_count(delta: int = 1) -> int:
 
 # --- Player event helpers ---
 def add_actor_stall_event(event: dict):
-    """Append an actor stall event (trim list to ACTOR_STALL_MAX)."""
+    """Append an actor stall event and also register a unified proximity report."""
     try:
         global actor_stall_events
         rec = dict(event)
-        try:
-            rec['overlay_added'] = time.time()
-        except Exception:
-            pass
+        now_ts = time.time()
+        rec.setdefault('overlay_added', now_ts)
         actor_stall_events.append(rec)
         if len(actor_stall_events) > ACTOR_STALL_MAX:
-            # keep newest N (events appended in chronological order from log tail)
             actor_stall_events = actor_stall_events[-ACTOR_STALL_MAX:]
+        # Unified report
+        add_proximity_report({
+            'kind': 'actor_stall',
+            'player': rec.get('player'),
+            'from_player': None,
+            'ship': None,
+            'timestamp': rec.get('timestamp'),
+            'overlay_added': rec.get('overlay_added') or now_ts,
+        })
     except Exception:
         pass
 
@@ -538,20 +560,23 @@ def get_actor_stall_events():
 
 
 def add_fake_hit_event(event: dict):
-    """Add a fake hit (interdiction) event. Maintain max size; newest at end.
-
-    Expects keys: 'timestamp', 'player', 'ship', 'expires_at'.
-    """
+    """Add a fake hit (snare/interdiction) event & unified proximity report."""
     try:
         global fake_hit_events
         rec = dict(event)
-        try:
-            rec['overlay_added'] = time.time()
-        except Exception:
-            pass
+        now_ts = time.time()
+        rec.setdefault('overlay_added', now_ts)
         fake_hit_events.append(rec)
         if len(fake_hit_events) > FAKE_HIT_MAX:
             fake_hit_events = fake_hit_events[-FAKE_HIT_MAX:]
+        add_proximity_report({
+            'kind': 'fake_hit',
+            'player': rec.get('target_player') or rec.get('player'),
+            'from_player': rec.get('from_player'),
+            'ship': rec.get('ship'),
+            'timestamp': rec.get('timestamp'),
+            'overlay_added': rec.get('overlay_added') or now_ts,
+        })
     except Exception:
         pass
 
@@ -570,6 +595,48 @@ def prune_expired_fake_hit_events(now_ts: float):
         fake_hit_events = [e for e in fake_hit_events if (e.get('expires_at') or 0) >= now_ts]
     except Exception:
         pass
+
+def add_proximity_report(rec: dict):
+    """Add a unified proximity report card entry.
+
+    Dedupes same kind+player within PROXIMITY_DEDUP_SECONDS to avoid spam when
+    parser already debounces but tests/users manually inject.
+    """
+    try:
+        global proximity_reports
+        now_ts = time.time()
+        kind = rec.get('kind')
+        player = rec.get('player')
+        # Dedup check: find last matching kind+player within window
+        if kind and player:
+            for prev in reversed(proximity_reports[-10:]):  # search recent subset for speed
+                try:
+                    if prev.get('kind') == kind and prev.get('player') == player:
+                        age = now_ts - float(prev.get('overlay_added') or now_ts)
+                        if age < PROXIMITY_DEDUP_SECONDS:
+                            return  # ignore duplicate burst
+                        break
+                except Exception:
+                    pass
+        entry = {
+            'kind': kind,
+            'player': player,
+            'from_player': rec.get('from_player'),
+            'ship': rec.get('ship'),
+            'timestamp': rec.get('timestamp'),
+            'overlay_added': rec.get('overlay_added') or now_ts,
+        }
+        proximity_reports.append(entry)
+        if len(proximity_reports) > PROXIMITY_REPORTS_MAX:
+            proximity_reports = proximity_reports[-PROXIMITY_REPORTS_MAX:]
+    except Exception:
+        pass
+
+def get_proximity_reports():
+    try:
+        return list(proximity_reports)
+    except Exception:
+        return []
 
 
 def log(message):

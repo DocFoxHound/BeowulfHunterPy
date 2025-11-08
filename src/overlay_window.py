@@ -1,13 +1,21 @@
 import tkinter as tk
+import tkinter.font as tkfont
 import global_variables
 import time
 from datetime import datetime, timezone
+import re
+import threading
+import io
+from typing import Optional, Dict, Any
+
+import requests  # type: ignore
+from PIL import Image, ImageTk  # type: ignore
 
 class OverlayManager:
     def __init__(self, root_app):
         self.root_app = root_app
         self.win = None
-        self.width = 340
+        self.width = 340  # base minimum; will auto-grow to fit longest line
         self.bg = '#111111'
         self.fg = '#f5f5f5'
         self.border = '#333333'
@@ -17,6 +25,11 @@ class OverlayManager:
         self.lines = []
         # periodic refresh handle
         self._tick_id = None
+        # caches and placeholders
+        self._avatar_cache: Dict[str, Any] = {}
+        self._profile_cache: Dict[str, Any] = {}
+        self._ph_org_small = None
+        self._ph_avatar_small = None
 
     def show(self):
         if self.win is not None and self.win.winfo_exists():
@@ -41,6 +54,7 @@ class OverlayManager:
             pass
         self.container = tk.Frame(self.win, bg=self.bg)
         self.container.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self._ensure_image_caches()
         self._reposition()
         self.refresh()
         self._start_tick()
@@ -116,6 +130,209 @@ class OverlayManager:
         except Exception:
             pass
 
+    # --- Image/profile helpers ---
+    def _ensure_image_caches(self):
+        app = global_variables.get_app()
+        try:
+            if app is not None:
+                if not hasattr(app, 'org_avatar_cache') or not isinstance(getattr(app, 'org_avatar_cache'), dict):
+                    setattr(app, 'org_avatar_cache', {})
+                if not hasattr(app, 'proximity_profile_cache') or not isinstance(getattr(app, 'proximity_profile_cache'), dict):
+                    setattr(app, 'proximity_profile_cache', {})
+                self._avatar_cache = getattr(app, 'org_avatar_cache')
+                self._profile_cache = getattr(app, 'proximity_profile_cache')
+                # Placeholders
+                self._ph_avatar_small = getattr(app, 'placeholder_avatar_small', None)
+                self._ph_org_small = getattr(app, 'placeholder_org_small', None)
+        except Exception:
+            pass
+        # Ensure placeholders exist
+        if self._ph_avatar_small is None or self._ph_org_small is None:
+            try:
+                ph_a = Image.new('RGBA', (16, 16), (60,60,60,255))
+                ph_o = Image.new('RGBA', (16, 16), (80,80,80,255))
+                if self._ph_avatar_small is None:
+                    self._ph_avatar_small = ImageTk.PhotoImage(ph_a)
+                if self._ph_org_small is None:
+                    self._ph_org_small = ImageTk.PhotoImage(ph_o)
+            except Exception:
+                pass
+
+    def _make_square_thumbnail(self, img: Image.Image, size: int = 16) -> Image.Image:
+        try:
+            w, h = img.size
+            if w != h:
+                side = min(w, h)
+                left = (w - side) // 2
+                top = (h - side) // 2
+                img = img.crop((left, top, left + side, top + side))
+            return img.resize((size, size), Image.Resampling.LANCZOS)
+        except Exception:
+            return img
+
+    def _download_photoimage(self, url: Optional[str], size: int = 16):
+        if not isinstance(url, str) or not url.strip():
+            return None
+        key = f"{url}#{size}"
+        try:
+            if key in self._avatar_cache:
+                return self._avatar_cache.get(key)
+            r = requests.get(url, timeout=6)
+            if r.status_code != 200:
+                return None
+            im = Image.open(io.BytesIO(r.content)).convert('RGBA')
+            im = self._make_square_thumbnail(im, size)
+            photo = ImageTk.PhotoImage(im)
+            self._avatar_cache[key] = photo
+            return photo
+        except Exception:
+            return None
+
+    def _fetch_rsi_profile(self, handle: Optional[str]):
+        if not isinstance(handle, str) or not handle:
+            return (None, None, None)
+        try:
+            key = str(handle).strip().lower()
+        except Exception:
+            key = None
+        if key and key in self._profile_cache:
+            try:
+                cached = self._profile_cache.get(key)
+                return (cached.get('org_img_url'), cached.get('avatar_url'), cached.get('org_name'))
+            except Exception:
+                pass
+        url = f"https://robertsspaceindustries.com/en/citizens/{handle}"
+        try:
+            headers = {"User-Agent": "BeowulfHunter/1.0 (overlay)", "Accept": "text/html,application/xhtml+xml"}
+            r = requests.get(url, headers=headers, timeout=6)
+            if r.status_code != 200:
+                return (None, None, None)
+            html = r.text
+            m_avatar = re.search(r'<span class="title">\s*Profile\s*</span>.*?<img\s+src="([^"]+)"', html, re.IGNORECASE | re.DOTALL)
+            m_orgimg = re.search(r'<span class="title">\s*Main\s+organization\s*</span>.*?<img\s+src="([^"]+)"', html, re.IGNORECASE | re.DOTALL)
+            m_orgname = re.search(r'<span class="title">\s*Main\s+organization\s*</span>.*?<a[^>]*>([^<]+)</a>', html, re.IGNORECASE | re.DOTALL)
+            def _abs(u):
+                if not u:
+                    return None
+                return ("https://robertsspaceindustries.com" + u) if str(u).startswith('/') else u
+            avatar_url = _abs(m_avatar.group(1)) if m_avatar else None
+            orgimg_url = _abs(m_orgimg.group(1)) if m_orgimg else None
+            org_name = m_orgname.group(1).strip() if m_orgname else None
+            if key is not None:
+                try:
+                    self._profile_cache[key] = {'avatar_url': avatar_url, 'org_img_url': orgimg_url, 'org_name': org_name}
+                except Exception:
+                    pass
+            return (orgimg_url, avatar_url, org_name)
+        except Exception:
+            return (None, None, None)
+
+    class _ToolTip:
+        def __init__(self, outer, widget: tk.Widget, text: str = ""):
+            self.outer = outer
+            self.widget = widget
+            self.text = text
+            self.tip: Optional[tk.Toplevel] = None
+            try:
+                widget.bind("<Enter>", self._enter)
+                widget.bind("<Leave>", self._leave)
+                widget.bind("<Motion>", self._motion)
+            except Exception:
+                pass
+        def _enter(self, _evt=None):
+            self._show()
+        def _leave(self, _evt=None):
+            self._hide()
+        def _motion(self, evt):
+            try:
+                if self.tip is not None:
+                    x = evt.x_root + 12
+                    y = evt.y_root + 12
+                    self.tip.wm_geometry(f"+{x}+{y}")
+            except Exception:
+                pass
+        def _show(self):
+            if not self.text:
+                return
+            try:
+                if self.tip is not None:
+                    return
+                tip = tk.Toplevel(self.outer.win if self.outer and self.outer.win else self.widget)
+                tip.wm_overrideredirect(True)
+                tip.attributes('-topmost', True)
+                lbl = tk.Label(tip, text=str(self.text), bg="#2a2a2a", fg="#ffffff", relief="solid", borderwidth=1, font=("Times New Roman", 10))
+                lbl.pack(ipadx=6, ipady=3)
+                x = self.widget.winfo_rootx() + 10
+                y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+                tip.wm_geometry(f"+{x}+{y}")
+                self.tip = tip
+            except Exception:
+                self.tip = None
+        def _hide(self):
+            try:
+                if self.tip is not None:
+                    self.tip.destroy()
+                    self.tip = None
+            except Exception:
+                self.tip = None
+
+    def _add_images_for_handle(self, row: tk.Frame, handle: Optional[str], known_org_url: Optional[str] = None, known_avatar_url: Optional[str] = None, known_org_name: Optional[str] = None):
+        og = tk.Label(row, bg=self.bg)
+        av = tk.Label(row, bg=self.bg)
+        # placeholders
+        try:
+            if self._ph_org_small:
+                og.configure(image=self._ph_org_small); og.image = self._ph_org_small
+            if self._ph_avatar_small:
+                av.configure(image=self._ph_avatar_small); av.image = self._ph_avatar_small
+        except Exception:
+            pass
+        og.pack(side=tk.LEFT, padx=(4,2), pady=2)
+        av.pack(side=tk.LEFT, padx=(0,6), pady=2)
+        # Known URLs first
+        if isinstance(known_org_url, str) and known_org_url.strip():
+            try:
+                og_img = self._download_photoimage(known_org_url.strip(), 16)
+                if og_img:
+                    og.configure(image=og_img); og.image = og_img
+                if isinstance(known_org_name, str) and known_org_name.strip():
+                    self._ToolTip(self, og, known_org_name.strip())
+            except Exception:
+                pass
+        if isinstance(known_avatar_url, str) and known_avatar_url.strip():
+            try:
+                av_img = self._download_photoimage(known_avatar_url.strip(), 16)
+                if av_img:
+                    av.configure(image=av_img); av.image = av_img
+            except Exception:
+                pass
+        # Async fetch if needed
+        if (not known_org_url or not known_avatar_url) and isinstance(handle, str) and handle.strip():
+            def _worker():
+                orgimg_url, avatar_url, org_name = self._fetch_rsi_profile(handle)
+                org_photo = self._download_photoimage(orgimg_url, 16)
+                av_photo = self._download_photoimage(avatar_url, 16)
+                def _apply():
+                    try:
+                        if isinstance(org_photo, ImageTk.PhotoImage):
+                            og.configure(image=org_photo); og.image = org_photo
+                            if org_name:
+                                self._ToolTip(self, og, str(org_name))
+                        if isinstance(av_photo, ImageTk.PhotoImage):
+                            av.configure(image=av_photo); av.image = av_photo
+                    except Exception:
+                        pass
+                try:
+                    if self.win:
+                        self.win.after(0, _apply)
+                except Exception:
+                    pass
+            try:
+                threading.Thread(target=_worker, daemon=True).start()
+            except Exception:
+                pass
+        return og, av
+
     def add_event_line(self, text: str, kind: str):
         # Add a live line and schedule a future fade
         try:
@@ -173,8 +390,10 @@ class OverlayManager:
                 filtered.append(l)
         # Clear existing widgets
         for w in self.line_widgets:
-            try: w.destroy()
-            except Exception: pass
+            try:
+                w.destroy()
+            except Exception:
+                pass
         self.line_widgets = []
         if not filtered:
             try:
@@ -188,18 +407,66 @@ class OverlayManager:
             pass
         # Render last up to 12 with fade-out coloring over last 3 seconds
         now = time.time()
+        blink_phase = int((time.time() * 2) % 2)  # toggle every 0.5s
+        temp_rows = []
         for line in filtered[-12:]:
-            txt = line.get('text')
+            kind = line.get('kind')
             added = line.get('ts') or now
             age = max(0.0, now - float(added))
-            # Fade between 7-10 seconds: t in [0,1]
             t = 0.0
             if age >= 7.0:
                 t = min(1.0, (age - 7.0) / 3.0)
-            fg = self._mix_color(self.bg, self.fg, t)
-            lbl = tk.Label(self.container, text=txt, fg=fg, bg=self.bg, font=self.font, anchor='w', justify='left')
-            lbl.pack(fill=tk.X, padx=2)
-            self.line_widgets.append(lbl)
+            fg_base = self._mix_color(self.bg, self.fg, t)
+            row = tk.Frame(self.container, bg=self.bg)
+            row.pack(fill=tk.X, padx=2)
+            # Type prefix at the beginning
+            try:
+                pfx = {'kill': '[KILL]', 'actor_stall': '[PROX]', 'fake_hit': '[SNAR]'}.get(kind, '[INFO]')
+                tk.Label(row, text=pfx, fg=fg_base, bg=self.bg, font=('Consolas', 10)).pack(side=tk.LEFT, padx=(4,4))
+            except Exception:
+                pass
+            # Colored gumball per kind
+            try:
+                gb_color = {'kill': '#ef4444', 'actor_stall': '#22c55e', 'fake_hit': '#facc15'}.get(kind, '#9ca3af')
+                tk.Label(row, text='●', fg=gb_color, bg=self.bg, font=('Consolas', 10)).pack(side=tk.LEFT, padx=(0,6))
+            except Exception:
+                pass
+            # Build per-kind layout with images adjacent to names
+            if kind == 'fake_hit':
+                fp = line.get('from_player') or ''
+                tp = line.get('player') or ''
+                ship = line.get('ship') or ''
+                self._add_images_for_handle(row, fp)
+                tk.Label(row, text=fp, fg=( '#facc15' if blink_phase == 1 else fg_base), bg=self.bg, font=self.font).pack(side=tk.LEFT, padx=(0,4))
+                tk.Label(row, text='->', fg=fg_base, bg=self.bg, font=self.font).pack(side=tk.LEFT, padx=(0,4))
+                self._add_images_for_handle(row, tp)
+                tk.Label(row, text=tp, fg=( '#facc15' if blink_phase == 1 else fg_base), bg=self.bg, font=self.font).pack(side=tk.LEFT, padx=(0,4))
+                tail = f" {ship} -{int(age)}s" if ship else f" -{int(age)}s"
+                tk.Label(row, text=tail, fg=fg_base, bg=self.bg, font=self.font).pack(side=tk.LEFT, padx=(0,4))
+            elif kind == 'kill':
+                self._add_images_for_handle(row, line.get('player'), known_org_url=line.get('org_picture_url'), known_avatar_url=line.get('avatar_url'), known_org_name=line.get('org_name'))
+                ship = line.get('ship') or ''
+                age_sec = int(max(0, now - (line.get('ts') or now)))
+                txt_lbl = f"{line.get('player')} {ship} -{age_sec}s" if ship else f"{line.get('player')} -{age_sec}s"
+                tk.Label(row, text=txt_lbl, fg=fg_base, bg=self.bg, font=self.font, anchor='w').pack(side=tk.LEFT, fill=tk.X, expand=True)
+            else:  # actor_stall
+                self._add_images_for_handle(row, line.get('player'))
+                age_sec = int(max(0, now - (line.get('ts') or now)))
+                txt_lbl = f"{line.get('player')} -{age_sec}s"
+                tk.Label(row, text=txt_lbl, fg=fg_base, bg=self.bg, font=self.font, anchor='w').pack(side=tk.LEFT, fill=tk.X, expand=True)
+            temp_rows.append(row)
+        # Compute required width using requested widths of built rows (only grow, never shrink rapidly)
+        try:
+            self.win.update_idletasks()
+            needed = max([r.winfo_reqwidth() for r in temp_rows] + [340]) + 8  # padding
+            screen_w = self.win.winfo_screenwidth()
+            needed = min(needed, screen_w - 10)
+            # Only adjust width if difference is significant (>4px) to avoid jitter; allow shrink but not below min
+            if abs(needed - self.width) > 4:
+                self.width = max(340, needed)
+        except Exception:
+            pass
+        self.line_widgets = temp_rows
         self._reposition()
 
     def _rebuild_from_globals(self):
@@ -219,10 +486,13 @@ class OverlayManager:
                     fp = ev.get('from_player') or ev.get('player')
                     tp = ev.get('target_player') or ev.get('player')
                     ship = ev.get('ship') or ''
-                    ship_clean = ship.split('_')[0] if isinstance(ship, str) and ship else ''
+                    # Preserve full ship name but strip trailing numeric instance id if present
+                    ship_clean = ''
+                    if isinstance(ship, str) and ship:
+                        ship_clean = re.sub(r"_[0-9]+$", "", ship.strip())
                     age_sec = int(max(0, now - (ev.get('overlay_added') or now)))
                     text = f"INT {fp}->{tp} {ship_clean} -{age_sec}s"
-                    lines.append({'text': text, 'ts': ev.get('overlay_added') or now, 'kind': 'fake_hit'})
+                    lines.append({'text': text, 'ts': ev.get('overlay_added') or now, 'kind': 'fake_hit', 'player': tp, 'from_player': fp, 'ship': ship_clean})
         except Exception:
             pass
         # Actor stalls (nearby)
@@ -234,7 +504,7 @@ class OverlayManager:
                     p = ev.get('player')
                     age_sec = int(max(0, now - added))
                     text = f"NEAR {p} -{age_sec}s"
-                    lines.append({'text': text, 'ts': added, 'kind': 'actor_stall'})
+                    lines.append({'text': text, 'ts': added, 'kind': 'actor_stall', 'player': p})
         except Exception:
             pass
         # Kills (latest) – only locally added recent ones have _overlay_added
@@ -247,10 +517,14 @@ class OverlayManager:
                 victims = rec.get('victims') if isinstance(rec.get('victims'), list) else []
                 v = victims[0] if victims else 'Victim'
                 ship_used = rec.get('ship_used') or rec.get('killers_ship') or ''
-                ship_short = ship_used.split('_')[0] if isinstance(ship_used, str) and ship_used else ''
+                ship_display = ''
+                if isinstance(ship_used, str) and ship_used:
+                    ship_display = re.sub(r"_[0-9]+$", "", ship_used.strip())
                 age_sec = int(max(0, now - added))
-                text = f"KILL {v} {ship_short} -{age_sec}s"
-                lines.append({'text': text, 'ts': added, 'kind': 'kill'})
+                text = f"KILL {v} {ship_display} -{age_sec}s"
+                lines.append({'text': text, 'ts': added, 'kind': 'kill', 'player': v,
+                              'org_picture_url': rec.get('org_picture'), 'avatar_url': rec.get('victim_image'), 'org_name': rec.get('org_sid'),
+                              'ship': ship_display})
         except Exception:
             pass
         # Keep only last 12 most recent by ts

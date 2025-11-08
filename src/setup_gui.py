@@ -10,6 +10,7 @@ from packaging import version
 from PIL import Image, ImageTk
 from config import set_sc_log_location, get_player_name, find_rsi_handle, is_game_running
 from keys import validate_api_key, save_api_key, load_existing_key
+import keys as keys_module
 import backup_loader
 import global_variables
 from filelock import FileLock, Timeout
@@ -139,6 +140,38 @@ def setup_gui(game_running):
 
     # Keep default geometry but don't lock min/max; allow user to resize freely
 
+    # Persist window size changes to cfg (debounced)
+    try:
+        setattr(app, '_last_geo_save_job', None)
+        setattr(app, '_last_size', (650, 400))
+        def _on_configure(evt=None):
+            try:
+                w = app.winfo_width(); h = app.winfo_height()
+                last = getattr(app, '_last_size', None)
+                if last == (w, h):
+                    return
+                setattr(app, '_last_size', (w, h))
+                job = getattr(app, '_last_geo_save_job', None)
+                if job is not None:
+                    try: app.after_cancel(job)
+                    except Exception: pass
+                def _save():
+                    try:
+                        keys_module.save_extended_settings({'window_w': str(w), 'window_h': str(h)})
+                    except Exception:
+                        pass
+                    setattr(app, '_last_geo_save_job', None)
+                try:
+                    job = app.after(750, _save)
+                except Exception:
+                    job = None
+                setattr(app, '_last_geo_save_job', job)
+            except Exception:
+                pass
+        app.bind('<Configure>', _on_configure)
+    except Exception:
+        pass
+
     return app, None
 
 
@@ -244,6 +277,16 @@ def initialize_game_gui(app):
 
     # Allow the main window to resize; avoid locking min/max dimensions here
 
+    # Ensure overlay state from config is applied on launch
+    try:
+        if global_variables.is_overlay_enabled():
+            from overlay_window import ensure_overlay, refresh_overlay  # type: ignore
+            ensure_overlay(); refresh_overlay()
+        else:
+            from overlay_window import disable_overlay  # type: ignore
+            disable_overlay()
+    except Exception:
+        pass
 
     # Old monitoring helpers removed; logic lives in controllers.game_controller
 

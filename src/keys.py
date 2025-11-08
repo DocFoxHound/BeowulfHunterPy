@@ -2,6 +2,7 @@ import requests
 import os
 import sys
 import datetime
+from typing import Any  # Added for extended settings annotations
 from config import set_sc_log_location, get_player_name
 import global_variables
 
@@ -13,6 +14,9 @@ org_api_key = {"value": None}
 custom_sound_interdiction = {"value": None}
 custom_sound_nearby = {"value": None}
 custom_sound_kill = {"value": None}
+
+# Extended settings cache (loaded from cfg beyond first 5 lines)
+extended_settings: dict[str, str] = {}
 
 def _get_assets_dir() -> str:
     """Return the assets directory for default resources.
@@ -142,8 +146,8 @@ def save_api_key(key, org_key: str | None = None):
     try:
         line1 = (key or "").strip()
         line2 = (org_key or "").strip()
-        # Load existing to retain sound paths
-        existing_lines = []
+        # Load existing to retain sound paths and any extended settings (lines >5)
+        existing_lines: list[str] = []
         try:
             with open("killtracker_key.cfg", "r", encoding="utf-8") as f:
                 existing_lines = f.read().splitlines()
@@ -153,10 +157,9 @@ def save_api_key(key, org_key: str | None = None):
         snd_interdiction = existing_lines[2].strip() if len(existing_lines) >= 3 else (custom_sound_interdiction["value"] or "")
         snd_nearby = existing_lines[3].strip() if len(existing_lines) >= 4 else (custom_sound_nearby["value"] or "")
         snd_kill = existing_lines[4].strip() if len(existing_lines) >= 5 else (custom_sound_kill["value"] or "")
-        out_lines = [line1, line2, snd_interdiction, snd_nearby, snd_kill]
-        # Trim trailing empty lines while ensuring at least 2 lines persist
-        while len(out_lines) > 2 and out_lines[-1] == "":
-            out_lines.pop()
+        # Preserve any extended settings lines beyond index 4
+        extra = existing_lines[5:] if len(existing_lines) > 5 else []
+        out_lines = [line1, line2, snd_interdiction, snd_nearby, snd_kill] + extra
         with open("killtracker_key.cfg", "w", encoding="utf-8") as f:
             f.write("\n".join(out_lines))
         api_key["value"] = line1
@@ -233,7 +236,7 @@ def load_existing_key():
                 if os.path.isfile(cand):
                     snd_kill = cand
         except Exception:
-            pass
+            snd_kill = None
         custom_sound_interdiction["value"] = snd_interdiction
         custom_sound_nearby["value"] = snd_nearby
         custom_sound_kill["value"] = snd_kill
@@ -250,10 +253,101 @@ def load_existing_key():
             global_variables.set_custom_sound_kill(snd_kill)
         except Exception:
             pass
+        # Parse extended settings (lines >5) key=value pairs
+        try:
+            for raw in lines[5:]:
+                if not raw or "=" not in raw:
+                    continue
+                k, v = raw.split("=", 1)
+                k = k.strip(); v = v.strip()
+                extended_settings[k] = v
+            _apply_extended_settings()
+        except Exception:
+            pass
         return player
     except FileNotFoundError:
         global_variables.log("No existing key found. Please enter valid keys.")
         return None
+
+def _apply_extended_settings():
+    """Apply extended settings loaded into extended_settings dict to global variables."""
+    try:
+        # Overlay enabled & corner
+        ov_en = extended_settings.get("overlay_enabled")
+        if ov_en is not None:
+            global_variables.set_overlay_enabled(ov_en.lower() in ("1","true","yes"))
+        ov_corner = extended_settings.get("overlay_corner")
+        if ov_corner:
+            global_variables.set_overlay_corner(ov_corner)
+        # After applying, ensure overlay state matches
+        try:
+            if global_variables.is_overlay_enabled():
+                from overlay_window import ensure_overlay, refresh_overlay  # type: ignore
+                ensure_overlay(); refresh_overlay()
+            else:
+                from overlay_window import disable_overlay  # type: ignore
+                disable_overlay()
+        except Exception:
+            pass
+        # Window geometry
+        win_w = extended_settings.get("window_w")
+        win_h = extended_settings.get("window_h")
+        app = global_variables.get_app()
+        if app and win_w and win_h:
+            try:
+                app.geometry(f"{int(win_w)}x{int(win_h)}")
+            except Exception:
+                pass
+        # Notices & sounds
+        def _bool(name, default):
+            val = extended_settings.get(name)
+            if val is None:
+                return default
+            return val.lower() in ("1","true","yes")
+        global_variables.set_show_kill_notice(_bool("show_kill_notice", global_variables.get_show_kill_notice()))
+        global_variables.set_show_snare_notice(_bool("show_snare_notice", global_variables.get_show_snare_notice()))
+        global_variables.set_show_proximity_notice(_bool("show_proximity_notice", global_variables.get_show_proximity_notice()))
+        global_variables.set_play_kill_sound(_bool("play_kill_sound", global_variables.get_play_kill_sound()))
+        global_variables.set_play_snare_sound(_bool("play_snare_sound", global_variables.get_play_snare_sound()))
+        global_variables.set_play_proximity_sound(_bool("play_proximity_sound", global_variables.get_play_proximity_sound()))
+    except Exception:
+        pass
+
+def save_extended_settings(updates: dict[str, Any]):  # type: ignore[name-defined]
+    """Persist extended settings key=value pairs after the first 5 lines of cfg.
+
+    Creates file if missing. Only modifies/merges settings section; keeps first 5 lines intact.
+    """
+    # Merge updates into in-memory cache first
+    try:
+        for k, v in (updates or {}).items():
+            if v is None:
+                continue
+            extended_settings[str(k)] = str(v)
+    except Exception:
+        pass
+    # Load existing lines
+    try:
+        with open("killtracker_key.cfg", "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except Exception:
+        lines = []
+    # Ensure at least 5 placeholder lines exist
+    while len(lines) < 5:
+        lines.append("")
+    # Rebuild extended section
+    ext_lines = [f"{k}={v}" for k, v in sorted(extended_settings.items())]
+    out = lines[:5] + ext_lines
+    try:
+        with open("killtracker_key.cfg", "w", encoding="utf-8") as f:
+            f.write("\n".join(out))
+    except Exception as e:
+        global_variables.log(f"Failed to save extended settings: {e}")
+    # Apply immediately
+    try:
+        _apply_extended_settings()
+    except Exception:
+        pass
 
 def update_sound_paths(interdiction_path: str | None, nearby_path: str | None, kill_path: str | None = None):
     """Update (or clear) custom sound paths, preserving existing keys.
@@ -273,8 +367,15 @@ def update_sound_paths(interdiction_path: str | None, nearby_path: str | None, k
     line5 = (kill_path or "").strip()
     # Persist
     try:
+        # Preserve extended settings lines beyond first 5
+        try:
+            with open("killtracker_key.cfg", "r", encoding="utf-8") as f:
+                existing_lines = f.read().splitlines()
+        except Exception:
+            existing_lines = []
+        extras = existing_lines[5:] if len(existing_lines) > 5 else []
         with open("killtracker_key.cfg", "w", encoding="utf-8") as f:
-            f.write("\n".join([player, org, line3, line4, line5]))
+            f.write("\n".join([player, org, line3, line4, line5] + extras))
         custom_sound_interdiction["value"] = line3 or None
         custom_sound_nearby["value"] = line4 or None
         custom_sound_kill["value"] = line5 or None

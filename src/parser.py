@@ -115,9 +115,38 @@ def _ensure_kill_worker():
                         except Exception:
                             pass
                     global_variables.set_api_kills_all(existing)
+                    # Also add to unified proximity reports so Proximity tab shows this kill
+                    try:
+                        vk = json_data.get('victim')
+                    except Exception:
+                        vk = None
+                    try:
+                        ship_used = json_data.get('killers_ship') if (json_data.get('killers_ship') and json_data.get('killers_ship') != 'N/A') else None
+                    except Exception:
+                        ship_used = None
+                    try:
+                        global_variables.add_proximity_report({
+                            'kind': 'kill',
+                            'player': vk,
+                            'from_player': None,
+                            'ship': ship_used,
+                            'timestamp': json_data.get('time'),
+                            'overlay_added': stamp,
+                        })
+                    except Exception:
+                        pass
                 except Exception:
                     pass
                 _refresh_overlay_safe()
+                try:
+                    v = json_data.get('victim') or 'Victim'
+                    ship_used = json_data.get('killers_ship') if (json_data.get('killers_ship') and json_data.get('killers_ship') != 'N/A') else None
+                    if ship_used:
+                        _append_proximity_line(f"[KILL] {v} ({ship_used})")
+                    else:
+                        _append_proximity_line(f"[KILL] {v}")
+                except Exception:
+                    pass
 
                 # Create API-like record and append to combined list
                 dt = (str(json_data.get('damage_type') or '')).lower()
@@ -188,6 +217,27 @@ def _refresh_overlay_safe():
     try:
         if refresh_overlay:
             refresh_overlay()
+    except Exception:
+        pass
+
+def _append_proximity_line(text: str):
+    """Append a line to the Proximity tab large text box if available.
+
+    Safe from any thread: schedules via app.after when possible.
+    """
+    try:
+        refs = global_variables.get_proximity_tab_refs() or {}
+        fn = refs.get('append_report_line')
+        if not callable(fn):
+            return
+        app = global_variables.get_app()
+        if app is not None:
+            try:
+                app.after(0, lambda: fn(text))
+            except Exception:
+                fn(text)
+        else:
+            fn(text)
     except Exception:
         pass
 
@@ -1553,6 +1603,10 @@ def parse_actor_stall_event(line: str):
         _request_proximity_sound('actor_stall')
         _update_player_events_ui()
         _refresh_overlay_safe()
+        try:
+            _append_proximity_line(f"[NEAR] {player}")
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -1607,6 +1661,17 @@ def parse_fake_hit_event(line: str):
     _request_proximity_sound('fake_hit')
     _update_player_events_ui()
     _refresh_overlay_safe()
+    try:
+        if from_player and player and ship_clean:
+            _append_proximity_line(f"[SNARE] {from_player} -> {player} ({ship_clean})")
+        elif from_player and player:
+            _append_proximity_line(f"[SNARE] {from_player} -> {player}")
+        elif player and ship_clean:
+            _append_proximity_line(f"[SNARE] {player} ({ship_clean})")
+        elif player:
+            _append_proximity_line(f"[SNARE] {player}")
+    except Exception:
+        pass
 
 
 def _update_player_events_ui():
